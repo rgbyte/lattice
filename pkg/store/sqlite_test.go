@@ -83,6 +83,8 @@ func (g *mockGraphIndex) GetNode(nodeID string) (types.Node, bool) {
 	n, ok := g.nodes[nodeID]
 	return n, ok
 }
+func (g *mockGraphIndex) AllNodes() []types.Node { return nil }
+func (g *mockGraphIndex) AllEdges() []types.Edge { return nil }
 func (g *mockGraphIndex) Neighbors(nodeID string, filter types.NodeFilterFunc) []types.Edge {
 	return nil
 }

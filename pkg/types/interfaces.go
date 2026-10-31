@@ -51,6 +51,8 @@ type GraphIndex interface {
 	RemoveNode(nodeID string)
 	RemoveEdgesFrom(sourceID string)
 	GetNode(nodeID string) (Node, bool)
+	AllNodes() []Node
+	AllEdges() []Edge
 	Neighbors(nodeID string, filter NodeFilterFunc) []Edge
 	PersonalizedPageRank(ctx context.Context, seeds map[string]float64, filter NodeFilterFunc, opts PPROptions) (map[string]float64, error)
 	ShortestPath(ctx context.Context, fromID, toID string, maxHops int, filter NodeFilterFunc) ([]Edge, error)
