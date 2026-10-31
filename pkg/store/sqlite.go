@@ -53,6 +53,8 @@ type SQLiteStore struct {
 	writeMu sync.Mutex
 }
 
+var _ types.StorageBackend = (*SQLiteStore)(nil)
+
 const schemaDDL = `
 CREATE TABLE IF NOT EXISTS cg_documents (
 	id                TEXT PRIMARY KEY,
@@ -216,11 +218,14 @@ func (s *SQLiteStore) UpsertDocumentBundle(ctx context.Context, bundle types.Doc
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// 2. Remove stale FTS5 rows and chunks for this document
+	// 2. Remove stale FTS5 rows, chunks, and outgoing edges for this document
 	if _, err := tx.ExecContext(ctx, `DELETE FROM cg_chunks_fts WHERE doc_id = ?`, doc.ID); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM cg_chunks WHERE doc_id = ?`, doc.ID); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM cg_edges WHERE source_id = ?`, doc.ID); err != nil {
 		return false, err
 	}
 
@@ -554,6 +559,10 @@ func (s *SQLiteStore) Hydrate(ctx context.Context, vIdx types.VectorIndex, gIdx 
 				return err
 			}
 		}
+		if err := nodeRows.Err(); err != nil {
+			_ = nodeRows.Close()
+			return err
+		}
 		if err := nodeRows.Close(); err != nil {
 			return err
 		}
@@ -602,6 +611,10 @@ func (s *SQLiteStore) Hydrate(ctx context.Context, vIdx types.VectorIndex, gIdx 
 				return err
 			}
 		}
+		if err := edgeRows.Err(); err != nil {
+			_ = edgeRows.Close()
+			return err
+		}
 		if err := edgeRows.Close(); err != nil {
 			return err
 		}
@@ -630,6 +643,10 @@ func (s *SQLiteStore) Hydrate(ctx context.Context, vIdx types.VectorIndex, gIdx 
 					return err
 				}
 			}
+		}
+		if err := chunkRows.Err(); err != nil {
+			_ = chunkRows.Close()
+			return err
 		}
 		if err := chunkRows.Close(); err != nil {
 			return err
@@ -660,9 +677,9 @@ func upsertNodeTx(ctx context.Context, tx *sql.Tx, n types.Node) error {
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			kind             = excluded.kind,
-			title            = excluded.title,
+			title            = CASE WHEN excluded.title = '' OR excluded.title = excluded.id THEN cg_nodes.title ELSE excluded.title END,
 			properties_json  = excluded.properties_json,
-			permissions_json = excluded.permissions_json,
+			permissions_json = CASE WHEN excluded.permissions_json = '[]' THEN cg_nodes.permissions_json ELSE excluded.permissions_json END,
 			updated_at       = excluded.updated_at
 	`, n.ID, string(n.Kind), n.Title, propsJSON, permsJSON, n.UpdatedAt.Unix())
 	return err

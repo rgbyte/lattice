@@ -214,6 +214,9 @@ func (e *Engine) IndexDocument(ctx context.Context, doc types.Document, asyncEnr
 	if e.closed.Load() {
 		return nil, types.ErrEngineClosed
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	doc.ID = strings.TrimSpace(doc.ID)
 	doc.Title = strings.TrimSpace(doc.Title)
 	if doc.ID == "" || doc.Title == "" {
@@ -315,6 +318,7 @@ func (e *Engine) IndexDocument(ctx context.Context, doc types.Document, asyncEnr
 			_ = e.vIdx.Upsert(ch.ID, ch.Vector)
 		}
 	}
+	e.gIdx.RemoveEdgesFrom(doc.ID)
 	for _, n := range allNodes {
 		_ = e.gIdx.UpsertNode(n)
 	}
@@ -348,6 +352,9 @@ func (e *Engine) IndexDocument(ctx context.Context, doc types.Document, asyncEnr
 func (e *Engine) EnrichDocumentNow(ctx context.Context, docID string) (*types.EnrichmentResult, error) {
 	if e.closed.Load() {
 		return nil, types.ErrEngineClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	doc, err := e.store.GetDocument(ctx, docID)
 	if err != nil {
@@ -463,12 +470,20 @@ func (e *Engine) buildFilters(ctx context.Context, principal types.PrincipalSet)
 	}
 
 	nodeFilter := func(nodeID string) bool {
+		// Security Invariant (SEC-01): Always consult authoritative document ACLs first
+		// whenever nodeID corresponds to an indexed document or NodeDocument vertex.
+		e.aclMu.RLock()
+		_, isTrackedDoc := e.docPerms[nodeID]
+		e.aclMu.RUnlock()
+		if isTrackedDoc {
+			return canAccessDoc(nodeID)
+		}
 		if node, ok := e.gIdx.GetNode(nodeID); ok {
-			if len(node.Permissions) > 0 {
-				return principal.CanAccess(node.Permissions)
-			}
 			if node.Kind == types.NodeDocument {
 				return canAccessDoc(nodeID)
+			}
+			if len(node.Permissions) > 0 {
+				return principal.CanAccess(node.Permissions)
 			}
 		}
 		return canAccessDoc(nodeID)
@@ -482,6 +497,9 @@ func (e *Engine) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 	if e.closed.Load() {
 		return nil, types.ErrEngineClosed
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	if req.Limit <= 0 {
 		req.Limit = 10
@@ -490,7 +508,10 @@ func (e *Engine) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 	chunkFilter, nodeFilter := e.buildFilters(ctx, req.Principal)
 
 	// Stage 1A: Lexical BM25 via SQLite FTS5
-	lexHits, _ := e.store.SearchFTS(ctx, req.Query, req.Limit*4)
+	lexHits, err := e.store.SearchFTS(ctx, req.Query, req.Limit*4)
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	lexRank := make(map[string]int, len(lexHits))
 	r := 1
 	for _, lh := range lexHits {
@@ -578,11 +599,14 @@ func (e *Engine) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 	}
 
 	// Stage 2: ACL-Isolated Personalized PageRank over CSR Graph
-	pprScores, _ := e.gIdx.PersonalizedPageRank(ctx, seeds, nodeFilter, types.PPROptions{
+	pprScores, err := e.gIdx.PersonalizedPageRank(ctx, seeds, nodeFilter, types.PPROptions{
 		Alpha:         0.15,
 		MaxIterations: 20,
 		Tolerance:     1e-6,
 	})
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
 	// Normalize max PPR score for interpretable [0, 1] scaling
 	maxPPR := 0.0

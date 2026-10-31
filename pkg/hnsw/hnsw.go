@@ -3,7 +3,6 @@ package hnsw
 import (
 	"container/heap"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -635,19 +634,22 @@ func (idx *Index) ReadFrom(r io.Reader) (int64, error) {
 		return cr.n, err
 	}
 	if magic != snapshotMagic {
-		return cr.n, errors.New("hnsw: invalid snapshot magic")
+		return cr.n, fmt.Errorf("%w: hnsw invalid snapshot magic", types.ErrInvalidInput)
 	}
 	version, err := readU32()
 	if err != nil {
 		return cr.n, err
 	}
 	if version != snapshotVersion {
-		return cr.n, fmt.Errorf("hnsw: unsupported snapshot version %d", version)
+		return cr.n, fmt.Errorf("%w: hnsw unsupported snapshot version %d", types.ErrInvalidInput, version)
 	}
 
 	dim, err := readU32()
 	if err != nil {
 		return cr.n, err
+	}
+	if dim == 0 || dim > 4096 {
+		return cr.n, fmt.Errorf("%w: hnsw snapshot dimension %d out of bounds", types.ErrInvalidInput, dim)
 	}
 	m, err := readU32()
 	if err != nil {
@@ -677,6 +679,9 @@ func (idx *Index) ReadFrom(r io.Reader) (int64, error) {
 	if err != nil {
 		return cr.n, err
 	}
+	if nodeCount > 10_000_000 || activeCnt > nodeCount || (ep >= 0 && uint32(ep) >= nodeCount) {
+		return cr.n, fmt.Errorf("%w: hnsw snapshot node bounds invalid", types.ErrInvalidInput)
+	}
 
 	nodes := make([]*hnswNode, nodeCount)
 	idToIdx := make(map[string]uint32, activeCnt)
@@ -685,6 +690,9 @@ func (idx *Index) ReadFrom(r io.Reader) (int64, error) {
 		idLen, err := readU32()
 		if err != nil {
 			return cr.n, err
+		}
+		if idLen > 4096 {
+			return cr.n, fmt.Errorf("%w: hnsw snapshot id length %d exceeds limit", types.ErrInvalidInput, idLen)
 		}
 		idBytes := make([]byte, idLen)
 		if _, err := io.ReadFull(cr, idBytes); err != nil {
@@ -710,17 +718,26 @@ func (idx *Index) ReadFrom(r io.Reader) (int64, error) {
 		if err != nil {
 			return cr.n, err
 		}
+		if numLayers > 32 {
+			return cr.n, fmt.Errorf("%w: hnsw snapshot layer count %d exceeds limit", types.ErrInvalidInput, numLayers)
+		}
 		friends := make([][]uint32, numLayers)
 		for l := uint32(0); l < numLayers; l++ {
 			fLen, err := readU32()
 			if err != nil {
 				return cr.n, err
 			}
+			if fLen > 1024 {
+				return cr.n, fmt.Errorf("%w: hnsw snapshot neighbor count %d exceeds limit", types.ErrInvalidInput, fLen)
+			}
 			layerFriends := make([]uint32, fLen)
 			for f := uint32(0); f < fLen; f++ {
 				nb, err := readU32()
 				if err != nil {
 					return cr.n, err
+				}
+				if nb >= nodeCount {
+					return cr.n, fmt.Errorf("%w: hnsw snapshot neighbor index %d out of range", types.ErrInvalidInput, nb)
 				}
 				layerFriends[f] = nb
 			}

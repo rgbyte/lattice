@@ -33,9 +33,6 @@ func ExtractGoFile(docID, filePath, src string, permissions []string) ([]types.C
 	}
 
 	perms := cloneSlice(permissions)
-	if len(perms) == 0 {
-		perms = []string{"public"}
-	}
 	now := time.Now().UTC()
 
 	var (
