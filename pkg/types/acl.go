@@ -1,6 +1,9 @@
 package types
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // NodeFilterFunc evaluates whether a given node or chunk ID is accessible to the caller.
 type NodeFilterFunc func(id string) bool
@@ -41,8 +44,15 @@ func NewPrincipalSet(userID, userEmail string, groups []string) PrincipalSet {
 // CanAccess evaluates a resource's ACL permission list using a strict FAIL-CLOSED policy:
 // if permissions is empty or contains no matching rule, access is denied.
 func (p PrincipalSet) CanAccess(permissions []string) bool {
+	_, _, allowed := p.MatchRuleDetailed(permissions)
+	return allowed
+}
+
+// MatchRuleDetailed evaluates a resource's ACL permission list using a strict FAIL-CLOSED policy
+// and returns the exact matching rule, a human-readable reason, and whether access is granted.
+func (p PrincipalSet) MatchRuleDetailed(permissions []string) (matchedRule string, reason string, allowed bool) {
 	if len(permissions) == 0 {
-		return false
+		return "", "denied: resource has empty permissions (fail-closed)", false
 	}
 	for _, raw := range permissions {
 		rule := strings.ToLower(strings.TrimSpace(raw))
@@ -50,25 +60,25 @@ func (p PrincipalSet) CanAccess(permissions []string) bool {
 			continue
 		}
 		if p.AllowPublic && (rule == "*" || rule == "public") {
-			return true
+			return raw, fmt.Sprintf("allowed by public rule %q", raw), true
 		}
 		if p.UserEmail != "" && (rule == p.UserEmail || rule == "user:"+p.UserEmail) {
-			return true
+			return raw, fmt.Sprintf("allowed by explicit user email rule %q", raw), true
 		}
 		if p.UserID != "" && (rule == p.UserID || rule == "person:"+p.UserID || rule == "user:"+p.UserID) {
-			return true
+			return raw, fmt.Sprintf("allowed by explicit user ID rule %q", raw), true
 		}
 		if p.Domain != "" && rule == "*@"+p.Domain {
-			return true
+			return raw, fmt.Sprintf("allowed by domain wildcard rule %q", raw), true
 		}
 		if strings.HasPrefix(rule, "group:") {
 			grp := strings.TrimPrefix(rule, "group:")
 			if _, ok := p.Groups[grp]; ok {
-				return true
+				return raw, fmt.Sprintf("allowed by group membership rule %q", raw), true
 			}
 		} else if _, ok := p.Groups[rule]; ok {
-			return true
+			return raw, fmt.Sprintf("allowed by group membership rule %q", raw), true
 		}
 	}
-	return false
+	return "", "denied: no matching principal rule in resource permissions (fail-closed)", false
 }

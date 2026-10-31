@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -110,6 +111,9 @@ func (s *Service) InspectDocument(ctx context.Context, docID string) (*DocumentI
 
 	var chunks []types.Chunk
 	for i := 0; i < 4096; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		chunkID := fmt.Sprintf("%s#c%d", docID, i)
 		ch, err := s.eng.Storage().GetChunk(ctx, chunkID)
 		if err != nil {
@@ -150,9 +154,13 @@ func (s *Service) InspectNode(
 	}
 	if hops <= 0 {
 		hops = 2
+	} else if hops > 10 {
+		hops = 10
 	}
 	if maxNodes <= 0 {
 		maxNodes = 50
+	} else if maxNodes > 1000 {
+		maxNodes = 1000
 	}
 
 	filter := s.buildNodeFilter(ctx, principal)
@@ -196,6 +204,8 @@ func (s *Service) ExplainConnection(
 	}
 	if maxHops <= 0 {
 		maxHops = 4
+	} else if maxHops > 10 {
+		maxHops = 10
 	}
 
 	globalPath, err := s.eng.GraphIndex().ShortestPath(ctx, fromID, toID, maxHops, nil)
@@ -244,6 +254,8 @@ func (s *Service) TriggerEnrichmentSweep(ctx context.Context, limit int) (*Enric
 	}
 	if limit <= 0 {
 		limit = 50
+	} else if limit > 500 {
+		limit = 500
 	}
 	start := time.Now()
 	pending, err := s.eng.Storage().ListPendingEnrichment(ctx, limit)
@@ -255,6 +267,9 @@ func (s *Service) TriggerEnrichmentSweep(ctx context.Context, limit int) (*Enric
 		Processed: len(pending),
 	}
 	for _, doc := range pending {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if _, err := s.eng.EnrichDocumentNow(ctx, doc.ID); err != nil {
 			report.Failed++
 		} else {
@@ -281,6 +296,9 @@ func (s *Service) DeleteDocument(ctx context.Context, docID string) error {
 
 // UpsertCustomEdge validates and persists a manual/custom directed edge into both ACID storage and the live CSR graph.
 func (s *Service) UpsertCustomEdge(ctx context.Context, edge types.Edge) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := edge.NormalizeAndValidate(); err != nil {
 		return err
 	}
@@ -290,7 +308,7 @@ func (s *Service) UpsertCustomEdge(ctx context.Context, edge types.Edge) error {
 	return s.eng.GraphIndex().UpsertEdge(edge)
 }
 
-// SaveVectorSnapshot writes a binary snapshot of the HNSW vector index to path.
+// SaveVectorSnapshot writes a binary snapshot of the HNSW vector index to path with owner-only permissions (0600).
 func (s *Service) SaveVectorSnapshot(ctx context.Context, path string) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -299,7 +317,8 @@ func (s *Service) SaveVectorSnapshot(ctx context.Context, path string) (int64, e
 	if path == "" {
 		return 0, fmt.Errorf("%w: snapshot path is required", types.ErrInvalidInput)
 	}
-	f, err := os.Create(path)
+	cleanPath := filepath.Clean(path)
+	f, err := os.OpenFile(cleanPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		return 0, err
 	}
@@ -316,7 +335,8 @@ func (s *Service) LoadVectorSnapshot(ctx context.Context, path string) (int64, e
 	if path == "" {
 		return 0, fmt.Errorf("%w: snapshot path is required", types.ErrInvalidInput)
 	}
-	f, err := os.Open(path)
+	cleanPath := filepath.Clean(path)
+	f, err := os.Open(cleanPath)
 	if err != nil {
 		return 0, err
 	}

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -43,6 +45,7 @@ func New(eng *engine.Engine, adm *admin.Service, cfg Config) (*Server, error) {
 			return nil, err
 		}
 	}
+	cfg.AdminToken = strings.TrimSpace(cfg.AdminToken)
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = defaultMaxBodyBytes
 	}
@@ -80,11 +83,10 @@ func (s *Server) authorizeBearer(r *http.Request) bool {
 		return false
 	}
 	provided := strings.TrimSpace(strings.TrimPrefix(authHeader, prefix))
-	expected := s.cfg.AdminToken
-	if len(provided) != len(expected) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+	// Compare fixed-size SHA-256 digests so token length is never leaked via timing (SEC-CP-02).
+	providedHash := sha256.Sum256([]byte(provided))
+	expectedHash := sha256.Sum256([]byte(s.cfg.AdminToken))
+	return subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) == 1
 }
 
 func (s *Server) registerRoutes() {
@@ -112,6 +114,9 @@ func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(consoleHTML))
 }
@@ -391,6 +396,8 @@ func writeDomainError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, types.ErrInvalidInput), errors.Is(err, types.ErrInvalidRelation), errors.Is(err, types.ErrDimensionMismatch):
 		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusGatewayTimeout, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
