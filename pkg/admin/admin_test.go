@@ -352,10 +352,42 @@ See auth.go and gateway.go for implementation details.
 		t.Fatalf("write README.md: %v", err)
 	}
 
-	// 1. Dry-Run Mode: must extract full graph (files, symbols, cross-file calls, mentions, tickets) WITHOUT mutating Engine
+	if err := os.WriteFile(filepath.Join(dir, "spec.pdf"), []byte(`%PDF-1.4
+1 0 obj
+<< /Title (Passkey Spec PDF) /Author (alice) >>
+endobj
+2 0 obj
+<< /Length 140 >>
+stream
+BT
+(1. WebAuthn Hardware Token Protocol) Tj T*
+(Reviewed by @rohit for service:auth-gateway and SEC-101.) Tj T*
+ET
+endstream
+endobj
+%%EOF`), 0600); err != nil {
+		t.Fatalf("write spec.pdf: %v", err)
+	}
+
+	// 1a. Docs-Only Dry-Run Mode: must match ONLY README.md and spec.pdf (2 files)
+	docsOnlyRep, err := svc.CrawlDirectory(ctx, CrawlRequest{
+		RootPath:    dir,
+		DryRun:      true,
+		Scope:       "docs",
+		Permissions: []string{"group:eng"},
+	})
+	if err != nil {
+		t.Fatalf("CrawlDirectory(Scope=docs): %v", err)
+	}
+	if docsOnlyRep.FilesMatched != 2 {
+		t.Fatalf("expected 2 matched files in Scope=docs (README.md + spec.pdf), got %d", docsOnlyRep.FilesMatched)
+	}
+
+	// 1b. All-Files Dry-Run Mode: must extract full graph (files, PDFs, symbols, cross-file calls, mentions, tickets) WITHOUT mutating Engine
 	dryRep, err := svc.CrawlDirectory(ctx, CrawlRequest{
 		RootPath:    dir,
 		DryRun:      true,
+		Scope:       "all",
 		Permissions: []string{"group:eng"},
 	})
 	if err != nil {
@@ -364,8 +396,8 @@ See auth.go and gateway.go for implementation details.
 	if !dryRep.DryRun {
 		t.Fatalf("expected DryRun=true in report")
 	}
-	if dryRep.FilesMatched != 3 {
-		t.Fatalf("expected 3 matched files, got %d", dryRep.FilesMatched)
+	if dryRep.FilesMatched != 4 {
+		t.Fatalf("expected 4 matched files (2 .go + 1 .md + 1 .pdf), got %d", dryRep.FilesMatched)
 	}
 	if dryRep.SymbolsExtracted < 4 {
 		t.Fatalf("expected >= 4 extracted Go symbols, got %d", dryRep.SymbolsExtracted)

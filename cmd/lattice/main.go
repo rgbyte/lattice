@@ -358,6 +358,7 @@ func execCrawlSubcommand(
 	var (
 		rootPath      string
 		dryRun        = globalDryRun
+		scope         = "all"
 		includeTestGo bool
 		maxFiles      = 250
 		perms         = []string{"*"}
@@ -369,6 +370,9 @@ func execCrawlSubcommand(
 			dryRun = true
 		case arg == "--include-tests" || arg == "-include-tests":
 			includeTestGo = true
+		case (arg == "--scope" || arg == "-scope") && i+1 < len(subArgs):
+			i++
+			scope = strings.TrimSpace(subArgs[i])
 		case (arg == "--path" || arg == "-path") && i+1 < len(subArgs):
 			i++
 			rootPath = strings.TrimSpace(subArgs[i])
@@ -382,12 +386,13 @@ func execCrawlSubcommand(
 		}
 	}
 	if rootPath == "" {
-		fmt.Fprintln(stderr, "usage: lattice crawl <folder-path> [--dry-run] [--include-tests] [--acl group:eng]")
+		fmt.Fprintln(stderr, "usage: lattice crawl <folder-path> [--dry-run] [--scope all|docs|code] [--include-tests] [--acl group:eng]")
 		return 2
 	}
 	rep, err := cli.CrawlDirectory(ctx, admin.CrawlRequest{
 		RootPath:      rootPath,
 		DryRun:        dryRun,
+		Scope:         scope,
 		MaxFiles:      maxFiles,
 		IncludeTestGo: includeTestGo,
 		Permissions:   perms,

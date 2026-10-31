@@ -264,3 +264,72 @@ func keysOf(m map[string]types.Edge) []string {
 	}
 	return out
 }
+
+func TestExtractPDFBytes_And_StructuralGraph(t *testing.T) {
+	// Construct a valid synthetic PDF with Title, Author, and BT...ET text operators
+	samplePDF := `%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 260 >>
+stream
+BT
+/F1 14 Tf
+(1. Zero-Trust Passkey Authentication) Tj T*
+(Authored with @alice and @rohit for service:auth-gateway.) Tj T*
+[(Addresses ) -120 (SEC-701 ) -120 (and ) -120 (PR #88.)] TJ T*
+(Decision: Enforce FIDO2 hardware passkeys for admin plane.) Tj T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Title (Enterprise Passkey Security Whitepaper) /Author (rohit) >>
+endobj
+%%EOF`
+
+	meta, err := ExtractPDFBytes([]byte(samplePDF))
+	if err != nil {
+		t.Fatalf("ExtractPDFBytes failed: %v", err)
+	}
+	if meta.Title != "Enterprise Passkey Security Whitepaper" {
+		t.Errorf("Title = %q, want 'Enterprise Passkey Security Whitepaper'", meta.Title)
+	}
+	if meta.Author != "rohit" {
+		t.Errorf("Author = %q, want 'rohit'", meta.Author)
+	}
+	if !strings.Contains(meta.Content, "# Zero-Trust Passkey Authentication") {
+		t.Errorf("expected numbered PDF heading to normalize to Markdown heading, got:\n%s", meta.Content)
+	}
+
+	doc := types.Document{
+		ID:          "doc:whitepaper.pdf",
+		SourceType:  "filesystem",
+		DocType:     "pdf",
+		Title:       meta.Title,
+		AuthorID:    meta.Author,
+		Content:     meta.Content,
+		Permissions: []string{"group:eng"},
+	}
+	chunks, nodes, edges := ChunkAndExtractStructural(doc, 500)
+	if len(chunks) == 0 {
+		t.Fatalf("expected chunks from PDF")
+	}
+
+	nodeKinds := make(map[types.NodeKind]int)
+	for _, n := range nodes {
+		nodeKinds[n.Kind]++
+	}
+	if nodeKinds[types.NodeTopic] == 0 || nodeKinds[types.NodeDecision] == 0 || nodeKinds[types.NodeService] == 0 {
+		t.Fatalf("expected topic, decision, and service nodes from PDF, got kinds: %+v", nodeKinds)
+	}
+	if len(edges) < 6 {
+		t.Fatalf("expected >= 6 structural edges from PDF, got %d", len(edges))
+	}
+}

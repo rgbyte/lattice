@@ -5,17 +5,43 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/rgbyte/lattice/pkg/types"
 )
 
 var (
-	reHeading    = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
-	reMention    = regexp.MustCompile(`(?:^|[\s(\[{,;])@([a-zA-Z][a-zA-Z0-9_-]{1,31})\b`)
-	reTicketKey  = regexp.MustCompile(`\b([A-Z]{2,10}-[0-9]{1,7})\b`)
-	rePRRef      = regexp.MustCompile(`(?i)\bPR\s*#([0-9]{1,7})\b`)
-	reSupersedes = regexp.MustCompile(`(?i)supersedes:\s*([a-zA-Z0-9_:-]+)`)
+	reHeading     = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
+	reMention     = regexp.MustCompile(`(?:^|[\s(\[{,;])@([a-zA-Z][a-zA-Z0-9_-]{1,31})\b`)
+	reTicketKey   = regexp.MustCompile(`\b([A-Z]{2,10}-[0-9]{1,7})\b`)
+	rePRRef       = regexp.MustCompile(`(?i)\bPR\s*#([0-9]{1,7})\b`)
+	reSupersedes  = regexp.MustCompile(`(?i)supersedes:\s*([a-zA-Z0-9_./:-]+)`)
+	reServiceRef  = regexp.MustCompile(`(?i)\bservice:([a-zA-Z0-9_-]{2,40})\b`)
+	reDecisionLine = regexp.MustCompile(`(?im)^(?:#{1,4}\s*|-?\s*\**)?decision(?:\**)?:\s*(.+)$`)
+	reRootCause   = regexp.MustCompile(`(?i)root\s+cause\s+of\s*:?\s*\b([A-Z]{2,10}-[0-9]{1,7})\b`)
+	reAuthorMeta  = regexp.MustCompile(`(?im)^(?:author|owner|authored\s+by)\s*:\s*@?([a-zA-Z][a-zA-Z0-9_.-]{1,31})`)
+	reTagsMeta    = regexp.MustCompile(`(?im)^(?:tags|topics)\s*:\s*\[?([^\n\]]+)\]?$`)
+	reHashtag     = regexp.MustCompile(`(?:^|[\s(\[{,;])#([a-zA-Z][a-zA-Z0-9_-]{2,31})\b`)
 )
+
+var genericSectionTitles = map[string]struct{}{
+	"overview":          {},
+	"summary":           {},
+	"introduction":      {},
+	"background":        {},
+	"details":           {},
+	"decision":          {},
+	"decisions":         {},
+	"conclusion":        {},
+	"notes":             {},
+	"references":        {},
+	"table-of-contents": {},
+	"usage":             {},
+	"testing":           {},
+	"license":           {},
+	"changelog":         {},
+	"todo":              {},
+}
 
 // BuildContextualText constructs the enriched passage text used for both FTS5 and dense embedding.
 func BuildContextualText(title, summary, headingPath, content string) string {
@@ -41,7 +67,7 @@ func BuildContextualText(title, summary, headingPath, content string) string {
 
 // ChunkAndExtractStructural splits a Document into heading-aware, context-prefixed Chunks
 // and extracts deterministic structural Nodes and Edges (AUTHORED, MENTIONS, COLLABORATES_WITH,
-// REFERENCES, SUPERSEDES) with Provenance = ProvStructural.
+// REFERENCES, SUPERSEDES, DEPENDS_ON, DECIDED, ROOT_CAUSE_OF, EXPERT_IN) with Provenance = ProvStructural.
 func ChunkAndExtractStructural(doc types.Document, maxChars int) ([]types.Chunk, []types.Node, []types.Edge) {
 	if maxChars <= 0 {
 		maxChars = 1200
@@ -178,7 +204,6 @@ func splitTextByMaxChars(text string, maxChars int) []string {
 			cur.WriteString(p)
 			continue
 		}
-		// Paragraph itself exceeds maxChars: split by words
 		words := strings.Fields(p)
 		for _, w := range words {
 			if cur.Len() > 0 && cur.Len()+1+len(w) > maxChars {
@@ -227,12 +252,15 @@ func extractStructuralGraph(doc types.Document, perms []string, now time.Time) (
 
 	// 1. Document node
 	docProps := map[string]string{
-		"source_type": string(doc.SourceType),
+		"source_type": doc.SourceType,
 		"doc_type":    doc.DocType,
 		"status":      string(doc.Status),
 	}
 	if doc.URL != "" {
 		docProps["url"] = doc.URL
+	}
+	if doc.FilePath != "" {
+		docProps["file_path"] = doc.FilePath
 	}
 	addNode(types.Node{
 		ID:          doc.ID,
@@ -243,11 +271,16 @@ func extractStructuralGraph(doc types.Document, perms []string, now time.Time) (
 		UpdatedAt:   now,
 	})
 
-	// 2. Author node & AUTHORED edge
+	// 2. Author node & AUTHORED edge (from struct metadata or inline frontmatter `author:`)
 	authorHandle := normalizePersonHandle(doc.AuthorID)
 	if authorHandle == "" && doc.AuthorEmail != "" {
 		if at := strings.IndexByte(doc.AuthorEmail, '@'); at > 0 {
 			authorHandle = normalizePersonHandle(doc.AuthorEmail[:at])
+		}
+	}
+	if authorHandle == "" {
+		if m := reAuthorMeta.FindStringSubmatch(doc.Content); len(m) > 1 {
+			authorHandle = normalizePersonHandle(m[1])
 		}
 	}
 	authorNodeID := ""
@@ -255,7 +288,7 @@ func extractStructuralGraph(doc types.Document, perms []string, now time.Time) (
 		authorNodeID = "person:" + authorHandle
 		authorTitle := doc.AuthorName
 		if authorTitle == "" {
-			authorTitle = authorHandle
+			authorTitle = "@" + authorHandle
 		}
 		addNode(types.Node{
 			ID:          authorNodeID,
@@ -319,7 +352,33 @@ func extractStructuralGraph(doc types.Document, perms []string, now time.Time) (
 		}
 	}
 
-	// 4. Ticket & PR references -> REFERENCES edges
+	// 4. Ticket & PR references -> REFERENCES & ROOT_CAUSE_OF edges
+	rootCauseTickets := make(map[string]struct{})
+	for _, m := range reRootCause.FindAllStringSubmatch(doc.Content, -1) {
+		ref := m[1]
+		rootCauseTickets[ref] = struct{}{}
+		ticketID := "ticket:" + ref
+		addNode(types.Node{
+			ID:          ticketID,
+			Kind:        types.NodeTicket,
+			Title:       ref,
+			Properties:  map[string]string{"key": ref},
+			Permissions: perms,
+			UpdatedAt:   now,
+		})
+		addEdge(types.Edge{
+			SourceID:   doc.ID,
+			SourceKind: types.NodeDocument,
+			TargetID:   ticketID,
+			TargetKind: types.NodeTicket,
+			Relation:   types.RelRootCauseOf,
+			Weight:     1.3,
+			Confidence: 1.0,
+			Evidence:   m[0],
+			CreatedAt:  now,
+		})
+	}
+
 	for _, m := range reTicketKey.FindAllStringSubmatch(doc.Content, -1) {
 		ref := m[1]
 		ticketID := "ticket:" + ref
@@ -390,7 +449,168 @@ func extractStructuralGraph(doc types.Document, perms []string, now time.Time) (
 		})
 	}
 
+	// 6. Services (`service:<name>`) -> NodeService & DEPENDS_ON edges
+	for _, m := range reServiceRef.FindAllStringSubmatch(doc.Content, -1) {
+		svcSlug := slugifyIdentifier(m[1])
+		if svcSlug == "" {
+			continue
+		}
+		svcID := "service:" + svcSlug
+		addNode(types.Node{
+			ID:          svcID,
+			Kind:        types.NodeService,
+			Title:       svcSlug,
+			Properties:  map[string]string{"service": svcSlug},
+			Permissions: perms,
+			UpdatedAt:   now,
+		})
+		addEdge(types.Edge{
+			SourceID:   doc.ID,
+			SourceKind: types.NodeDocument,
+			TargetID:   svcID,
+			TargetKind: types.NodeService,
+			Relation:   types.RelDependsOn,
+			Weight:     1.2,
+			Confidence: 1.0,
+			Evidence:   "service:" + svcSlug,
+			CreatedAt:  now,
+		})
+	}
+
+	// 7. Architectural Decisions (`Decision: ...`) -> NodeDecision & DECIDED edges
+	for _, m := range reDecisionLine.FindAllStringSubmatch(doc.Content, -1) {
+		decText := strings.TrimSpace(m[1])
+		if len(decText) < 5 {
+			continue
+		}
+		slug := slugifyIdentifier(decText)
+		if len(slug) > 36 {
+			slug = strings.TrimRight(slug[:36], "-")
+		}
+		if slug == "" {
+			continue
+		}
+		decID := "decision:" + slug
+		title := decText
+		if len(title) > 64 {
+			title = title[:61] + "..."
+		}
+		addNode(types.Node{
+			ID:          decID,
+			Kind:        types.NodeDecision,
+			Title:       title,
+			Properties:  map[string]string{"statement": decText, "source_doc": doc.ID},
+			Permissions: perms,
+			UpdatedAt:   now,
+		})
+		addEdge(types.Edge{
+			SourceID:   doc.ID,
+			SourceKind: types.NodeDocument,
+			TargetID:   decID,
+			TargetKind: types.NodeDecision,
+			Relation:   types.RelDecided,
+			Weight:     1.3,
+			Confidence: 1.0,
+			Evidence:   title,
+			CreatedAt:  now,
+		})
+	}
+
+	// 8. Topics from YAML frontmatter (`tags:` / `topics:`), inline `#hashtags`, and Markdown section headings (`#` / `##`)
+	if !strings.EqualFold(doc.DocType, "go") {
+		addTopic := func(rawTitle, evidence string) {
+			slug := slugifyIdentifier(rawTitle)
+			if len(slug) < 3 || len(slug) > 42 {
+				return
+			}
+			if _, isGeneric := genericSectionTitles[slug]; isGeneric {
+				return
+			}
+			topicID := "topic:" + slug
+			addNode(types.Node{
+				ID:          topicID,
+				Kind:        types.NodeTopic,
+				Title:       strings.TrimSpace(rawTitle),
+				Properties:  map[string]string{"slug": slug},
+				Permissions: perms,
+				UpdatedAt:   now,
+			})
+			addEdge(types.Edge{
+				SourceID:   doc.ID,
+				SourceKind: types.NodeDocument,
+				TargetID:   topicID,
+				TargetKind: types.NodeTopic,
+				Relation:   types.RelReferences,
+				Weight:     0.9,
+				Confidence: 0.95,
+				Evidence:   evidence,
+				CreatedAt:  now,
+			})
+			if authorNodeID != "" {
+				addEdge(types.Edge{
+					SourceID:   authorNodeID,
+					SourceKind: types.NodePerson,
+					TargetID:   topicID,
+					TargetKind: types.NodeTopic,
+					Relation:   types.RelExpertIn,
+					Weight:     0.8,
+					Confidence: 0.85,
+					Evidence:   fmt.Sprintf("authored %s covering %s", doc.ID, rawTitle),
+					CreatedAt:  now,
+				})
+			}
+		}
+
+		for _, m := range reTagsMeta.FindAllStringSubmatch(doc.Content, -1) {
+			for _, tag := range strings.Split(m[1], ",") {
+				tag = strings.Trim(strings.TrimSpace(tag), `"'#`)
+				if tag != "" {
+					addTopic(tag, "tag: "+tag)
+				}
+			}
+		}
+
+		for _, m := range reHashtag.FindAllStringSubmatch(doc.Content, -1) {
+			addTopic(m[1], "#"+m[1])
+		}
+
+		// Extract up to 6 meaningful H1/H2/H3 section topics per document
+		lines := strings.Split(strings.ReplaceAll(doc.Content, "\r\n", "\n"), "\n")
+		headingTopics := 0
+		for _, line := range lines {
+			if headingTopics >= 6 {
+				break
+			}
+			if m := reHeading.FindStringSubmatch(line); m != nil && len(m[1]) <= 3 {
+				hTitle := strings.TrimSpace(m[2])
+				// Strip leading numbering like "1. " or "Step 1: "
+				hTitle = strings.TrimLeftFunc(hTitle, func(r rune) bool {
+					return unicode.IsDigit(r) || r == '.' || r == ')' || r == ' '
+				})
+				if len(hTitle) >= 4 {
+					addTopic(hTitle, "heading: "+hTitle)
+					headingTopics++
+				}
+			}
+		}
+	}
+
 	return nodes, edges
+}
+
+func slugifyIdentifier(raw string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+		} else if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 func normalizePersonHandle(raw string) string {

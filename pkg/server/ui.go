@@ -716,17 +716,23 @@ try {
   <section class="command-bar" aria-label="Folder Graph Generator">
     <span class="field-label">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-      Folder Path
+      Folder
     </span>
-    <input id="crawlPath" type="text" class="mono" style="flex:1;min-width:260px" value="/Users/rohitgupta/Documents/glean-lite/lattice" placeholder="/path/to/repository/or/docs" />
+    <select id="crawlPreset" onchange="applyCrawlPreset(this.value)" title="Quick Folder Presets" style="max-width:145px">
+      <option value="/Users/rohitgupta/Documents/glean-lite/docs">Preset: /docs (KB)</option>
+      <option value="/Users/rohitgupta/Documents/glean-lite">Preset: Workspace</option>
+      <option value="/Users/rohitgupta/Documents/glean-lite/lattice">Preset: /lattice</option>
+    </select>
+    <input id="crawlPath" type="text" class="mono" style="flex:1;min-width:220px" value="/Users/rohitgupta/Documents/glean-lite/docs" placeholder="/path/to/docs/or/repository" />
+
+    <div class="segmented" role="group" aria-label="Crawl Scope">
+      <button class="seg-btn active" id="scopeBtnDocs" onclick="setCrawlScope('docs')">Docs Only</button>
+      <button class="seg-btn" id="scopeBtnAll" onclick="setCrawlScope('all')">Docs + Code</button>
+      <button class="seg-btn" id="scopeBtnCode" onclick="setCrawlScope('code')">Code Only</button>
+    </div>
 
     <span class="field-label">ACL</span>
-    <input id="crawlPerms" type="text" class="mono" style="width:110px" value="*" placeholder="*,group:eng" />
-
-    <label class="checkbox-pill">
-      <input id="crawlTests" type="checkbox" style="margin:0" />
-      <span>Include *_test.go</span>
-    </label>
+    <input id="crawlPerms" type="text" class="mono" style="width:90px" value="*" placeholder="*,group:eng" />
 
     <button id="btnDryRun" class="btn btn-subtle" onclick="runFolderCrawl(true)">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -751,14 +757,20 @@ try {
           <button class="seg-btn" data-kind="document" onclick="setKindFilter('document')">
             <span class="dot" style="background:#38bdf8"></span>Doc <span class="count-chip" id="cntDoc">0</span>
           </button>
-          <button class="seg-btn" data-kind="symbol" onclick="setKindFilter('symbol')">
-            <span class="dot" style="background:#a855f7"></span>Symbol <span class="count-chip" id="cntSym">0</span>
+          <button class="seg-btn" data-kind="topic" onclick="setKindFilter('topic')">
+            <span class="dot" style="background:#f97316"></span>Topic <span class="count-chip" id="cntTop">0</span>
+          </button>
+          <button class="seg-btn" data-kind="decision" onclick="setKindFilter('decision')">
+            <span class="dot" style="background:#ec4899"></span>Decision/Svc <span class="count-chip" id="cntDec">0</span>
           </button>
           <button class="seg-btn" data-kind="person" onclick="setKindFilter('person')">
             <span class="dot" style="background:#22c55e"></span>Person <span class="count-chip" id="cntPer">0</span>
           </button>
           <button class="seg-btn" data-kind="ticket" onclick="setKindFilter('ticket')">
             <span class="dot" style="background:#eab308"></span>Ticket <span class="count-chip" id="cntTkt">0</span>
+          </button>
+          <button class="seg-btn" data-kind="symbol" onclick="setKindFilter('symbol')">
+            <span class="dot" style="background:#a855f7"></span>Symbol <span class="count-chip" id="cntSym">0</span>
           </button>
         </div>
 
@@ -823,12 +835,20 @@ try {
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           Hybrid RRF &amp; PageRank Search
         </h2>
-        <span class="field-label tabular" id="searchLatencyBadge">BM25 + HNSW + PPR</span>
+        <div style="display:flex;align-items:center;gap:0.45rem">
+          <div class="segmented" role="group" aria-label="Search Corpus Filter">
+            <button class="seg-btn active" id="srchTypeDocs" onclick="setSearchDocFilter('docs')">Docs &amp; PDFs</button>
+            <button class="seg-btn" id="srchTypePDF" onclick="setSearchDocFilter('pdf')">PDF Only</button>
+            <button class="seg-btn" id="srchTypeAll" onclick="setSearchDocFilter('all')">All</button>
+            <button class="seg-btn" id="srchTypeCode" onclick="setSearchDocFilter('code')">Code</button>
+          </div>
+          <span class="field-label tabular" id="searchLatencyBadge">BM25 + HNSW + PPR</span>
+        </div>
       </div>
       <div class="card-controls">
-        <input id="searchQuery" type="text" placeholder="Query (e.g. Passkey WebAuthn)..." value="Passkey WebAuthn" />
-        <input id="searchUser" type="text" class="mono" placeholder="user_id" value="alice" style="max-width:95px" />
-        <input id="searchGroups" type="text" class="mono" placeholder="groups" value="group:eng" style="max-width:115px" />
+        <input id="searchQuery" type="text" placeholder="Search across docs, PDFs, RFCs &amp; code..." value="Passkey WebAuthn zero-trust" />
+        <input id="searchUser" type="text" class="mono" placeholder="user_id" value="alice" style="max-width:85px" />
+        <input id="searchGroups" type="text" class="mono" placeholder="groups" value="group:eng" style="max-width:105px" />
         <button class="btn btn-primary" onclick="runSearch()">Search</button>
       </div>
       <div class="card-body" id="searchOut"></div>
@@ -999,10 +1019,38 @@ let camX = 0, camY = 0, camScale = 1.0;
 let simAlpha = 1.0;
 let animFrameId = null;
 
-// Inspector Drawer State
+// Inspector Drawer & Crawl/Search Filter State
 let activeDrawerTab = 'vertex';
+let activeCrawlScope = 'docs';
+let activeSearchDocFilter = 'docs';
 let lastCrawlReport = null;
 let lastRawPayload = null;
+
+function applyCrawlPreset(path) {
+  if (!path) return;
+  document.getElementById('crawlPath').value = path;
+  if (path.endsWith('/docs')) {
+    setCrawlScope('docs');
+  } else {
+    setCrawlScope('all');
+  }
+}
+
+function setCrawlScope(scope) {
+  activeCrawlScope = scope;
+  document.getElementById('scopeBtnDocs').classList.toggle('active', scope === 'docs');
+  document.getElementById('scopeBtnAll').classList.toggle('active', scope === 'all');
+  document.getElementById('scopeBtnCode').classList.toggle('active', scope === 'code');
+}
+
+function setSearchDocFilter(mode) {
+  activeSearchDocFilter = mode;
+  document.getElementById('srchTypeDocs').classList.toggle('active', mode === 'docs');
+  document.getElementById('srchTypePDF').classList.toggle('active', mode === 'pdf');
+  document.getElementById('srchTypeAll').classList.toggle('active', mode === 'all');
+  document.getElementById('srchTypeCode').classList.toggle('active', mode === 'code');
+  runSearch();
+}
 
 function isDarkActive() {
   const m = getThemeMeta().content;
@@ -1015,10 +1063,13 @@ function colorForKind(kind) {
   switch ((kind || '').toLowerCase()) {
     case 'doc':
     case 'document': return '#38bdf8';
+    case 'topic':    return '#f97316';
+    case 'decision':
+    case 'service':  return '#ec4899';
     case 'symbol':   return '#a855f7';
     case 'person':   return '#22c55e';
     case 'ticket':   return '#eab308';
-    default:         return '#f97316';
+    default:         return '#71717a';
   }
 }
 
@@ -1051,11 +1102,13 @@ function setGraphData(nodes, edges, pprMap, modeLabel, isDryRun) {
   nodeById.clear();
   const maxPPR = Object.values(pprMap || {}).reduce((m, v) => Math.max(m, v || 0), 0.001);
 
-  let cntDoc = 0, cntSym = 0, cntPer = 0, cntTkt = 0;
+  let cntDoc = 0, cntTop = 0, cntDec = 0, cntSym = 0, cntPer = 0, cntTkt = 0;
 
   graphNodes = (nodes || []).map((n, idx) => {
     const kind = (n.kind || 'other').toLowerCase();
     if (kind === 'doc' || kind === 'document') cntDoc++;
+    else if (kind === 'topic') cntTop++;
+    else if (kind === 'decision' || kind === 'service') cntDec++;
     else if (kind === 'symbol') cntSym++;
     else if (kind === 'person') cntPer++;
     else if (kind === 'ticket') cntTkt++;
@@ -1102,6 +1155,8 @@ function setGraphData(nodes, edges, pprMap, modeLabel, isDryRun) {
 
   document.getElementById('cntAll').textContent = String(graphNodes.length);
   document.getElementById('cntDoc').textContent = String(cntDoc);
+  document.getElementById('cntTop').textContent = String(cntTop);
+  document.getElementById('cntDec').textContent = String(cntDec);
   document.getElementById('cntSym').textContent = String(cntSym);
   document.getElementById('cntPer').textContent = String(cntPer);
   document.getElementById('cntTkt').textContent = String(cntTkt);
@@ -1132,6 +1187,9 @@ function getVisibleNodes() {
   return graphNodes.filter(n => {
     if (activeKindFilter === 'document') {
       return n.kind === 'doc' || n.kind === 'document';
+    }
+    if (activeKindFilter === 'decision') {
+      return n.kind === 'decision' || n.kind === 'service';
     }
     return n.kind === activeKindFilter;
   });
@@ -1579,7 +1637,6 @@ async function loadLiveGraph() {
 async function runFolderCrawl(dryRun) {
   const rootPath = document.getElementById('crawlPath').value.trim();
   const perms = document.getElementById('crawlPerms').value.split(',').map(s => s.trim()).filter(Boolean);
-  const includeTestGo = document.getElementById('crawlTests').checked;
   if (!rootPath) {
     switchDrawerTab('crawl');
     document.getElementById('drawerContent').innerHTML = renderErrorBanner('Folder path is required.');
@@ -1596,7 +1653,8 @@ async function runFolderCrawl(dryRun) {
     const rep = await apiCall('/api/v1/admin/crawl', 'POST', {
       root_path: rootPath,
       dry_run: dryRun,
-      include_test_go: includeTestGo,
+      scope: activeCrawlScope,
+      include_test_go: false,
       permissions: perms.length ? perms : ['*'],
       max_files: 300
     });
@@ -1607,7 +1665,7 @@ async function runFolderCrawl(dryRun) {
       sg.nodes || [],
       sg.edges || [],
       rep.pagerank_scores || {},
-      dryRun ? 'Dry-Run Preview (Not Persisted)' : 'Indexed Folder Graph',
+      dryRun ? 'Dry-Run Preview (' + activeCrawlScope.toUpperCase() + ')' : 'Indexed Folder (' + activeCrawlScope.toUpperCase() + ')',
       dryRun
     );
     switchDrawerTab('crawl');
@@ -1629,35 +1687,51 @@ async function runSearch() {
   const out = document.getElementById('searchOut');
   out.innerHTML = renderSkeleton(3);
   const groups = document.getElementById('searchGroups').value.split(',').map(s => s.trim()).filter(Boolean);
+  let docTypes = [];
+  if (activeSearchDocFilter === 'docs') {
+    docTypes = ['pdf', 'markdown', 'text', 'html', 'docx', 'rfc', 'postmortem', 'memo', 'runbook', 'doc', 'yaml', 'json'];
+  } else if (activeSearchDocFilter === 'pdf') {
+    docTypes = ['pdf'];
+  } else if (activeSearchDocFilter === 'code') {
+    docTypes = ['go', 'typescript', 'javascript', 'python', 'sql', 'shell'];
+  }
   try {
     const res = await apiCall('/api/v1/search', 'POST', {
       query: document.getElementById('searchQuery').value.trim(),
       user_id: document.getElementById('searchUser').value.trim(),
       groups,
+      doc_types: docTypes,
       limit: 8
     });
     document.getElementById('searchLatencyBadge').textContent =
       (res.hits ? res.hits.length : 0) + ' hits · ' + (res.latency_ms || 0).toFixed(2) + ' ms';
 
     if (!res.hits || res.hits.length === 0) {
-      out.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:0.75rem 0">No authorized documents matched the query for this principal.</div>';
+      out.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:0.75rem 0">No authorized documents matched the query in the "' + esc(activeSearchDocFilter) + '" filter.</div>';
       return;
     }
 
     out.innerHTML = res.hits.map(h => {
       const s = h.score || {};
+      const dt = (h.document?.doc_type || 'doc').toLowerCase();
+      const dtBadge = '<span class="tag">' + esc(dt.toUpperCase()) + '</span>';
       const supBadge = (h.supersession && h.supersession.superseded)
         ? '<span class="tag tag-warn">Superseded by ' + esc(h.supersession.superseded_by_id) + '</span>'
         : '<span class="tag tag-ok">' + esc(h.document?.status || 'normal') + '</span>';
+      const headingLine = h.matched_chunk?.heading_path
+        ? '<div style="font-size:11px;color:var(--text-muted)" class="mono truncate">§ ' + esc(h.matched_chunk.heading_path) + '</div>'
+        : '';
       const pct = v => Math.min(100, Math.max(4, Math.round((v || 0) * 100)));
       return '<div class="hit-item">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem">' +
           '<span class="mono" style="font-weight:600;font-size:12px;cursor:pointer" onclick="selectNodeById(\'' + esc(h.document?.id) + '\')">' + esc(h.document?.title || h.document?.id) + '</span>' +
           '<div style="display:flex;align-items:center;gap:0.35rem">' +
+            dtBadge +
             supBadge +
             '<span class="tag tabular">Score ' + (s.final_score || 0).toFixed(3) + '</span>' +
           '</div>' +
         '</div>' +
+        headingLine +
         '<div style="font-size:12px;color:var(--text-secondary)" class="truncate">' + esc(h.matched_chunk?.content || '') + '</div>' +
         '<div class="score-bars">' +
           '<div class="score-cell"><div class="s-head"><span>BM25</span><span>' + (s.lexical_rrf || 0).toFixed(2) + '</span></div><div class="bar-track"><div class="bar-fill" style="width:' + pct(s.lexical_rrf * 4) + '%"></div></div></div>' +
