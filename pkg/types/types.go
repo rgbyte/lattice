@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -135,12 +136,12 @@ func (e *Edge) NormalizeAndValidate() error {
 	if e.TargetKind == "" {
 		e.TargetKind = NodeTopic
 	}
-	if e.Weight <= 0 {
+	if math.IsNaN(e.Weight) || math.IsInf(e.Weight, 0) || e.Weight <= 0 {
 		e.Weight = 1.0
 	} else if e.Weight > 10.0 {
 		e.Weight = 10.0
 	}
-	if e.Confidence <= 0 {
+	if math.IsNaN(e.Confidence) || math.IsInf(e.Confidence, 0) || e.Confidence <= 0 {
 		e.Confidence = 1.0
 	} else if e.Confidence > 1.0 {
 		e.Confidence = 1.0

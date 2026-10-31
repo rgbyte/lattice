@@ -72,7 +72,15 @@ func (idx *Index) UpsertNode(node types.Node) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	_, existed := idx.nodes[node.ID]
+	existing, existed := idx.nodes[node.ID]
+	if existed {
+		if len(node.Permissions) == 0 && len(existing.Permissions) > 0 {
+			node.Permissions = existing.Permissions
+		}
+		if (node.Title == "" || node.Title == node.ID) && existing.Title != "" {
+			node.Title = existing.Title
+		}
+	}
 	idx.nodes[node.ID] = node
 	if !existed {
 		idx.dirty = true
@@ -81,7 +89,7 @@ func (idx *Index) UpsertNode(node types.Node) error {
 }
 
 // UpsertEdge normalizes, validates, and inserts or updates a directed edge.
-// Placeholder nodes are automatically registered if either endpoint does not yet exist.
+// Placeholder nodes are automatically registered with fail-closed (nil) permissions if either endpoint does not yet exist.
 func (idx *Index) UpsertEdge(edge types.Edge) error {
 	if err := edge.NormalizeAndValidate(); err != nil {
 		return err
@@ -95,7 +103,7 @@ func (idx *Index) UpsertEdge(edge types.Edge) error {
 			ID:          edge.SourceID,
 			Kind:        edge.SourceKind,
 			Title:       edge.SourceID,
-			Permissions: []string{"*"},
+			Permissions: nil,
 			UpdatedAt:   edge.CreatedAt,
 		}
 	}
@@ -104,7 +112,7 @@ func (idx *Index) UpsertEdge(edge types.Edge) error {
 			ID:          edge.TargetID,
 			Kind:        edge.TargetKind,
 			Title:       edge.TargetID,
-			Permissions: []string{"*"},
+			Permissions: nil,
 			UpdatedAt:   edge.CreatedAt,
 		}
 	}

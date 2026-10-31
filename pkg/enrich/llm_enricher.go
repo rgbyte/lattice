@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -12,6 +13,10 @@ import (
 
 	"github.com/rgbyte/lattice/pkg/types"
 )
+
+var _ types.SemanticEnricher = (*Enricher)(nil)
+
+var reSandboxTagBreakout = regexp.MustCompile(`(?i)</?\s*untrusted_document_content[^>]*>`)
 
 const (
 	defaultMaxInputChars  = 6000
@@ -101,12 +106,13 @@ func (e *Enricher) callLLM(ctx context.Context, doc types.Document) (types.Enric
 	if len(content) > e.cfg.MaxInputChars {
 		content = content[:e.cfg.MaxInputChars]
 	}
-	// Neutralize any attempt to break out of the <untrusted_document_content> sandbox tag
-	sanitizedContent := strings.ReplaceAll(content, "</untrusted_document_content>", "[REDACTED_TAG]")
-	sanitizedContent = strings.ReplaceAll(sanitizedContent, "<untrusted_document_content>", "[REDACTED_TAG]")
+	// Neutralize any attempt (including case/whitespace variants) to break out of <untrusted_document_content>
+	sanitizedID := reSandboxTagBreakout.ReplaceAllString(strings.ReplaceAll(doc.ID, "\n", " "), "[REDACTED_TAG]")
+	sanitizedTitle := reSandboxTagBreakout.ReplaceAllString(strings.ReplaceAll(doc.Title, "\n", " "), "[REDACTED_TAG]")
+	sanitizedContent := reSandboxTagBreakout.ReplaceAllString(content, "[REDACTED_TAG]")
 
-	prompt := fmt.Sprintf("%s\n\nDocument ID: %s\nDocument Title: %s\n<untrusted_document_content>\n%s\n</untrusted_document_content>\n",
-		systemPromptInstruction, doc.ID, doc.Title, sanitizedContent)
+	prompt := fmt.Sprintf("%s\n\n<untrusted_document_content>\nDocument ID: %s\nDocument Title: %s\n\n%s\n</untrusted_document_content>\n",
+		systemPromptInstruction, sanitizedID, sanitizedTitle, sanitizedContent)
 
 	reqBody := map[string]any{
 		"model":  e.cfg.Model,
@@ -153,7 +159,7 @@ func (e *Enricher) callLLM(ctx context.Context, doc types.Document) (types.Enric
 		Entities       json.RawMessage `json:"entities"`
 		Relations      json.RawMessage `json:"relations"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&envelope); err != nil {
 		return types.EnrichmentResult{}, err
 	}
 
@@ -201,9 +207,6 @@ func (e *Enricher) callLLM(ctx context.Context, doc types.Document) (types.Enric
 
 	perms := make([]string, len(doc.Permissions))
 	copy(perms, doc.Permissions)
-	if len(perms) == 0 {
-		perms = []string{"public"}
-	}
 	now := time.Now().UTC()
 
 	nodeMap := make(map[string]types.Node)
@@ -213,6 +216,11 @@ func (e *Enricher) callLLM(ctx context.Context, doc types.Document) (types.Enric
 			continue
 		}
 		kind := normalizeNodeKind(ent.Kind)
+		// Security Invariant (SEC-01): Never allow an enriched document to emit a NodeDocument stub
+		// that overwrites another document's permissions.
+		if kind == types.NodeDocument && id != doc.ID {
+			continue
+		}
 		title := strings.TrimSpace(ent.Title)
 		if title == "" {
 			title = id
@@ -261,8 +269,8 @@ func (e *Enricher) callLLM(ctx context.Context, doc types.Document) (types.Enric
 		edgeSeen[edge.ID] = struct{}{}
 		edges = append(edges, edge)
 
-		// Ensure endpoint nodes exist in nodeMap with doc.Permissions
-		if _, ok := nodeMap[edge.SourceID]; !ok && edge.SourceID != doc.ID {
+		// Ensure non-document endpoint nodes exist in nodeMap with doc.Permissions (SEC-01)
+		if _, ok := nodeMap[edge.SourceID]; !ok && edge.SourceID != doc.ID && edge.SourceKind != types.NodeDocument {
 			nodeMap[edge.SourceID] = types.Node{
 				ID:          edge.SourceID,
 				Kind:        edge.SourceKind,
@@ -271,7 +279,7 @@ func (e *Enricher) callLLM(ctx context.Context, doc types.Document) (types.Enric
 				UpdatedAt:   now,
 			}
 		}
-		if _, ok := nodeMap[edge.TargetID]; !ok && edge.TargetID != doc.ID {
+		if _, ok := nodeMap[edge.TargetID]; !ok && edge.TargetID != doc.ID && edge.TargetKind != types.NodeDocument {
 			nodeMap[edge.TargetID] = types.Node{
 				ID:          edge.TargetID,
 				Kind:        edge.TargetKind,
@@ -311,9 +319,6 @@ var (
 func HeuristicEnrich(doc types.Document) types.EnrichmentResult {
 	perms := make([]string, len(doc.Permissions))
 	copy(perms, doc.Permissions)
-	if len(perms) == 0 {
-		perms = []string{"public"}
-	}
 	now := time.Now().UTC()
 
 	var (
@@ -391,18 +396,12 @@ func HeuristicEnrich(doc types.Document) types.EnrichmentResult {
 	}
 
 	// 3. Extract supersession (SUPERSEDES)
+	// Security Invariant (SEC-01): Do NOT emit a NodeDocument stub with doc.Permissions for targetID.
 	for _, m := range reSupersedesLine.FindAllStringSubmatch(doc.Content, 5) {
 		targetID := strings.TrimSpace(m[1])
 		if targetID == "" || targetID == doc.ID {
 			continue
 		}
-		addNode(types.Node{
-			ID:          targetID,
-			Kind:        types.NodeDocument,
-			Title:       targetID,
-			Permissions: perms,
-			UpdatedAt:   now,
-		})
 		addEdge(types.Edge{
 			SourceID:   doc.ID,
 			SourceKind: types.NodeDocument,

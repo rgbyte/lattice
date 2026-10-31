@@ -48,9 +48,6 @@ func ChunkAndExtractStructural(doc types.Document, maxChars int) ([]types.Chunk,
 	}
 
 	perms := cloneSlice(doc.Permissions)
-	if len(perms) == 0 {
-		perms = []string{"public"}
-	}
 	now := doc.UpdatedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -373,18 +370,13 @@ func extractStructuralGraph(doc types.Document, perms []string, now time.Time) (
 	}
 
 	// 5. Explicit Supersedes: -> SUPERSEDES edges
+	// Security Invariant (SEC-01): Do NOT emit a NodeDocument stub with doc.Permissions for
+	// targetDocID, as doing so could overwrite a confidential document's ACLs with a public doc's ACLs.
 	for _, m := range reSupersedes.FindAllStringSubmatch(doc.Content, -1) {
 		targetDocID := strings.TrimSpace(m[1])
 		if targetDocID == "" || targetDocID == doc.ID {
 			continue
 		}
-		addNode(types.Node{
-			ID:          targetDocID,
-			Kind:        types.NodeDocument,
-			Title:       targetDocID,
-			Permissions: perms,
-			UpdatedAt:   now,
-		})
 		addEdge(types.Edge{
 			SourceID:   doc.ID,
 			SourceKind: types.NodeDocument,

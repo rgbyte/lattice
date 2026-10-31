@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"math"
 	"net/http"
 	"strings"
@@ -13,6 +14,11 @@ import (
 	"unicode"
 
 	"github.com/rgbyte/lattice/pkg/types"
+)
+
+var (
+	_ types.Embedder = (*LocalEmbedder)(nil)
+	_ types.Embedder = (*OllamaEmbedder)(nil)
 )
 
 const (
@@ -274,7 +280,7 @@ func (o *OllamaEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 		Embeddings [][]float32 `json:"embeddings"`
 		Embedding  []float32   `json:"embedding"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&parsed); err != nil {
 		return o.fallback.EmbedBatch(ctx, texts)
 	}
 
