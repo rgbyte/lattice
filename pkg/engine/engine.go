@@ -776,6 +776,74 @@ func (e *Engine) VectorIndex() types.VectorIndex {
 	return e.vIdx
 }
 
+// Storage exposes the underlying StorageBackend.
+func (e *Engine) Storage() types.StorageBackend {
+	return e.store
+}
+
+// Embedder exposes the underlying Embedder.
+func (e *Engine) Embedder() types.Embedder {
+	return e.embedder
+}
+
+// DeleteDocument atomically removes a document, its chunks, and its graph edges from
+// SQLite storage, HNSW vector index, CSR graph index, and in-memory ACL caches.
+func (e *Engine) DeleteDocument(ctx context.Context, docID string) error {
+	if e.closed.Load() {
+		return types.ErrEngineClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	docID = strings.TrimSpace(docID)
+	if docID == "" {
+		return fmt.Errorf("%w: docID is required", types.ErrInvalidInput)
+	}
+
+	e.aclMu.Lock()
+	delete(e.docPerms, docID)
+	delete(e.docCache, docID)
+	var chunkIDs []string
+	for cid, did := range e.chunkToDoc {
+		if did == docID {
+			chunkIDs = append(chunkIDs, cid)
+			delete(e.chunkToDoc, cid)
+			delete(e.chunkCache, cid)
+		}
+	}
+	e.aclMu.Unlock()
+
+	for _, cid := range chunkIDs {
+		e.vIdx.Delete(cid)
+	}
+	// Also delete sequential chunk IDs up to 64 in case cache was cold after restart
+	for i := 0; i < 64; i++ {
+		e.vIdx.Delete(fmt.Sprintf("%s#c%d", docID, i))
+	}
+	e.gIdx.RemoveNode(docID)
+
+	return e.store.DeleteDocument(ctx, docID)
+}
+
+// RebuildIndices clears in-memory caches and re-hydrates the VectorIndex and GraphIndex
+// from the durable StorageBackend.
+func (e *Engine) RebuildIndices(ctx context.Context) error {
+	if e.closed.Load() {
+		return types.ErrEngineClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.aclMu.Lock()
+	e.docPerms = make(map[string][]string)
+	e.chunkToDoc = make(map[string]string)
+	e.docCache = make(map[string]types.Document)
+	e.chunkCache = make(map[string]types.Chunk)
+	e.aclMu.Unlock()
+
+	return e.store.Hydrate(ctx, e.vIdx, e.gIdx)
+}
+
 // Close gracefully stops background enrichment workers and closes the storage backend.
 func (e *Engine) Close() error {
 	if e.closed.CompareAndSwap(false, true) {

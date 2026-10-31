@@ -165,6 +165,36 @@ func (idx *Index) GetNode(nodeID string) (types.Node, bool) {
 	return n, ok
 }
 
+// AllNodes returns a deterministically sorted slice of all vertices in the graph.
+func (idx *Index) AllNodes() []types.Node {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	out := make([]types.Node, 0, len(idx.nodes))
+	for _, n := range idx.nodes {
+		out = append(out, n)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// AllEdges returns a deterministically sorted slice of all directed edges in the graph.
+func (idx *Index) AllEdges() []types.Edge {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	out := make([]types.Edge, 0, len(idx.edgeMap))
+	for _, e := range idx.edgeMap {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
 // ensureCompiledRLock returns with idx.mu RLocked and CSR structures guaranteed up-to-date.
 func (idx *Index) ensureCompiledRLock() {
 	idx.mu.RLock()
