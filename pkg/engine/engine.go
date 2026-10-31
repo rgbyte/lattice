@@ -259,6 +259,19 @@ func (e *Engine) IndexDocument(ctx context.Context, doc types.Document, asyncEnr
 	}
 	allNodes = append(allNodes, docNode)
 
+	// 0. If document is a raw PDF payload (%PDF-...), decode its text and metadata first
+	if strings.HasPrefix(strings.TrimSpace(doc.Content), "%PDF") {
+		if pdfMeta, err := extract.ExtractPDFBytes([]byte(doc.Content)); err == nil {
+			doc.Content = pdfMeta.Content
+			if doc.DocType == "" {
+				doc.DocType = "pdf"
+			}
+			if doc.AuthorID == "" && pdfMeta.Author != "" {
+				doc.AuthorID = pdfMeta.Author
+			}
+		}
+	}
+
 	// 1. Go AST deterministic extraction for .go files or go code docs
 	if strings.HasSuffix(strings.ToLower(doc.FilePath), ".go") || strings.EqualFold(doc.DocType, "go") {
 		syms, astNodes, astEdges, err := extract.ExtractGoFile(doc.ID, doc.FilePath, doc.Content, doc.Permissions)

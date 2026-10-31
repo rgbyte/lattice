@@ -1,12 +1,16 @@
 package admin
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +32,7 @@ type GraphSnapshot struct {
 type CrawlRequest struct {
 	RootPath      string   `json:"root_path"`
 	DryRun        bool     `json:"dry_run"`
+	Scope         string   `json:"scope"` // "all" (default), "docs", or "code"
 	MaxFiles      int      `json:"max_files"`
 	MaxFileBytes  int64    `json:"max_file_bytes"`
 	IncludeTestGo bool     `json:"include_test_go"`
@@ -38,6 +43,7 @@ type CrawlRequest struct {
 // FileCrawlSummary summarizes the extracted artifacts for a single file during a folder crawl.
 type FileCrawlSummary struct {
 	DocID          string `json:"doc_id"`
+	Title          string `json:"title"`
 	RelPath        string `json:"rel_path"`
 	DocType        string `json:"doc_type"`
 	Bytes          int64  `json:"bytes"`
@@ -51,6 +57,7 @@ type FileCrawlSummary struct {
 type CrawlReport struct {
 	RootPath         string             `json:"root_path"`
 	DryRun           bool               `json:"dry_run"`
+	Scope            string             `json:"scope"`
 	FilesScanned     int                `json:"files_scanned"`
 	FilesMatched     int                `json:"files_matched"`
 	FilesSkipped     int                `json:"files_skipped"`
@@ -82,20 +89,40 @@ var skippedDirNames = map[string]struct{}{
 	"coverage":     {},
 }
 
-var supportedCrawlExts = map[string]string{
-	".go":   "go",
-	".md":   "markdown",
-	".txt":  "text",
-	".yaml": "yaml",
-	".yml":  "yaml",
-	".json": "json",
-	".sql":  "sql",
-	".sh":   "shell",
-	".py":   "python",
-	".ts":   "typescript",
-	".tsx":  "typescript",
-	".js":   "javascript",
+var docCrawlExts = map[string]string{
+	".pdf":      "pdf",
+	".md":       "markdown",
+	".mdx":      "markdown",
+	".markdown": "markdown",
+	".txt":      "text",
+	".rst":      "text",
+	".adoc":     "text",
+	".html":     "html",
+	".htm":      "html",
+	".docx":     "docx",
+	".csv":      "text",
+	".yaml":     "yaml",
+	".yml":      "yaml",
+	".json":     "json",
 }
+
+var codeCrawlExts = map[string]string{
+	".go":  "go",
+	".sql": "sql",
+	".sh":  "shell",
+	".py":  "python",
+	".ts":  "typescript",
+	".tsx": "typescript",
+	".js":  "javascript",
+}
+
+var (
+	reFirstH1      = regexp.MustCompile(`(?m)^#\s+(.+?)\s*$`)
+	reTitleMeta    = regexp.MustCompile(`(?im)^title\s*:\s*["']?([^"'\n]+)["']?\s*$`)
+	reStatusMeta   = regexp.MustCompile(`(?im)^status\s*:\s*(verified|deprecated|draft|normal)\b`)
+	reBacktickTerm = regexp.MustCompile("`([A-Za-z][A-Za-z0-9_.]{2,48})`")
+	reHTMLTags     = regexp.MustCompile(`<[^>]+>`)
+)
 
 // ExportGraph returns a visualizable snapshot of the live in-memory Context Graph,
 // optionally filtered by a PrincipalSet, along with global PageRank authority scores.
@@ -172,7 +199,7 @@ func (s *Service) ExportGraph(
 }
 
 // CrawlDirectory recursively scans a local folder path, extracts Go AST symbols, call graphs,
-// package dependencies, and Markdown/text structural entities, and either returns a pure in-memory
+// package dependencies, and Markdown/text/HTML/DOCX structural entities, and either returns a pure in-memory
 // dry-run preview graph (when req.DryRun is true) or indexes the folder into the live Engine.
 func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlReport, error) {
 	if err := ctx.Err(); err != nil {
@@ -197,6 +224,11 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 	}
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%w: %q is not a directory", types.ErrInvalidInput, absRoot)
+	}
+
+	scope := strings.ToLower(strings.TrimSpace(req.Scope))
+	if scope != "docs" && scope != "code" {
+		scope = "all"
 	}
 
 	if req.MaxFiles <= 0 {
@@ -246,7 +278,6 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 			return nil
 		}
 
-		// Skip symlinks to prevent directory traversal loops
 		if d.Type()&fs.ModeSymlink != 0 {
 			filesSkipped++
 			return nil
@@ -269,31 +300,88 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 		}
 
 		ext := strings.ToLower(filepath.Ext(name))
-		docType, supported := supportedCrawlExts[ext]
-		if !supported {
-			filesSkipped++
-			return nil
+		docType, isDoc := docCrawlExts[ext]
+		codeType, isCode := codeCrawlExts[ext]
+
+		switch scope {
+		case "docs":
+			if !isDoc {
+				filesSkipped++
+				return nil
+			}
+		case "code":
+			if !isCode {
+				filesSkipped++
+				return nil
+			}
+			docType = codeType
+		default:
+			if isDoc {
+				// keep docType
+			} else if isCode {
+				docType = codeType
+			} else {
+				filesSkipped++
+				return nil
+			}
 		}
 
 		fi, err := d.Info()
-		if err != nil || fi.Size() == 0 || fi.Size() > req.MaxFileBytes {
+		maxAllowedBytes := req.MaxFileBytes
+		if docType == "pdf" || docType == "docx" {
+			if maxAllowedBytes < 16<<20 {
+				maxAllowedBytes = 16 << 20 // 16 MiB for PDF and DOCX documents
+			}
+		}
+		if err != nil || fi.Size() == 0 || fi.Size() > maxAllowedBytes {
 			filesSkipped++
 			return nil
 		}
 
-		rawBytes, err := os.ReadFile(path)
-		if err != nil {
-			filesSkipped++
-			return nil
-		}
-		// Reject binary files containing NUL bytes in the first 512 bytes
-		probe := rawBytes
-		if len(probe) > 512 {
-			probe = probe[:512]
-		}
-		if bytes.IndexByte(probe, 0) >= 0 {
-			filesSkipped++
-			return nil
+		var (
+			content   string
+			pdfTitle  string
+			pdfAuthor string
+		)
+		if docType == "pdf" {
+			rawBytes, err := os.ReadFile(path)
+			if err != nil {
+				filesSkipped++
+				return nil
+			}
+			pdfMeta, err := extract.ExtractPDFFile(path, rawBytes)
+			if err != nil || strings.TrimSpace(pdfMeta.Content) == "" {
+				filesSkipped++
+				return nil
+			}
+			content = pdfMeta.Content
+			pdfTitle = pdfMeta.Title
+			pdfAuthor = pdfMeta.Author
+		} else if docType == "docx" {
+			extracted, err := extractDocxText(path)
+			if err != nil || strings.TrimSpace(extracted) == "" {
+				filesSkipped++
+				return nil
+			}
+			content = extracted
+		} else {
+			rawBytes, err := os.ReadFile(path)
+			if err != nil {
+				filesSkipped++
+				return nil
+			}
+			probe := rawBytes
+			if len(probe) > 512 {
+				probe = probe[:512]
+			}
+			if bytes.IndexByte(probe, 0) >= 0 {
+				filesSkipped++
+				return nil
+			}
+			content = string(rawBytes)
+			if docType == "html" {
+				content = strings.TrimSpace(reHTMLTags.ReplaceAllString(content, " "))
+			}
 		}
 
 		relPath, err := filepath.Rel(absRoot, path)
@@ -302,19 +390,42 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 		}
 		relSlash := filepath.ToSlash(relPath)
 		docID := "doc:" + relSlash
-		content := string(rawBytes)
 		now := fi.ModTime().UTC()
+
+		title := relSlash
+		if pdfTitle != "" {
+			title = pdfTitle
+		} else if isDoc {
+			if m := reTitleMeta.FindStringSubmatch(content); len(m) > 1 {
+				title = strings.TrimSpace(m[1])
+			} else if m := reFirstH1.FindStringSubmatch(content); len(m) > 1 {
+				title = strings.TrimSpace(m[1])
+			}
+		}
+
+		status := types.StatusNormal
+		if m := reStatusMeta.FindStringSubmatch(content); len(m) > 1 {
+			switch strings.ToLower(m[1]) {
+			case "verified":
+				status = types.StatusVerified
+			case "deprecated":
+				status = types.StatusDeprecated
+			case "draft":
+				status = types.StatusDraft
+			}
+		}
 
 		doc := types.Document{
 			ID:          docID,
 			SourceType:  "filesystem",
 			DocType:     docType,
-			Title:       relSlash,
+			Title:       title,
 			FilePath:    relSlash,
 			URL:         "file://" + filepath.ToSlash(path),
+			AuthorID:    pdfAuthor,
 			Content:     content,
 			Permissions: perms,
-			Status:      types.StatusNormal,
+			Status:      status,
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		}
@@ -351,11 +462,24 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 		return nil, walkErr
 	}
 
-	// Deduplicate nodes & edges and resolve cross-file symbol calls and document references
 	nodeMap := make(map[string]types.Node)
 	edgeMap := make(map[string]types.Edge)
-	globalSymbols := make(map[string]string) // qualified "pkg.Name" or "Name" -> symbol Node ID
-	docByBase := make(map[string]string)     // filename or relPath -> docID
+	globalSymbols := make(map[string]string)
+	docByBase := make(map[string]string)
+
+	// Also seed globalSymbols with any existing symbol nodes in the live GraphIndex so docs-only crawls
+	// can still link backtick references (`IndexDocument`, `PrincipalSet`) to already-indexed code symbols!
+	for _, existingNode := range s.eng.GraphIndex().AllNodes() {
+		if existingNode.Kind == types.NodeSymbol {
+			globalSymbols[existingNode.Title] = existingNode.ID
+			if dot := strings.LastIndexByte(existingNode.Title, '.'); dot > 0 && dot+1 < len(existingNode.Title) {
+				short := existingNode.Title[dot+1:]
+				if _, ok := globalSymbols[short]; !ok {
+					globalSymbols[short] = existingNode.ID
+				}
+			}
+		}
+	}
 
 	addNode := func(n types.Node) {
 		if n.ID == "" {
@@ -405,6 +529,7 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 
 		summaries = append(summaries, FileCrawlSummary{
 			DocID:          art.doc.ID,
+			Title:          art.doc.Title,
 			RelPath:        art.relPath,
 			DocType:        art.doc.DocType,
 			Bytes:          art.bytes,
@@ -415,18 +540,15 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 		})
 	}
 
-	// Second pass: resolve cross-file Go function calls (e.g. engine.New calling csr.NewIndex or store.NewSQLiteStore)
+	// Second pass: resolve cross-file Go calls, sibling file links, and Doc -> CodeSymbol backtick references
 	var crossFileEdges []types.Edge
 	now := time.Now().UTC()
 	for _, art := range artifacts {
 		for _, sym := range art.symbols {
 			for _, call := range sym.Calls {
 				targetSymID, ok := globalSymbols[call]
-				if !ok {
-					// Also try unqualified if in the same package
-					if !strings.Contains(call, ".") {
-						targetSymID, ok = globalSymbols[sym.Package+"."+call]
-					}
+				if !ok && !strings.Contains(call, ".") {
+					targetSymID, ok = globalSymbols[sym.Package+"."+call]
 				}
 				if ok && targetSymID != "" && targetSymID != sym.ID {
 					ce := types.Edge{
@@ -451,8 +573,8 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 			}
 		}
 
-		// Resolve Markdown/text references to sibling files in the crawled directory
-		if art.doc.DocType == "markdown" || art.doc.DocType == "text" {
+		if art.doc.DocType != "go" {
+			// 1. Sibling file references
 			for refName, targetDocID := range docByBase {
 				if len(refName) < 4 || targetDocID == art.doc.ID {
 					continue
@@ -478,10 +600,39 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 					}
 				}
 			}
+
+			// 2. Backticked Code Symbol references (`IndexDocument`, `CrawlDirectory`, `PrincipalSet`)
+			for _, m := range reBacktickTerm.FindAllStringSubmatch(art.doc.Content, -1) {
+				term := strings.TrimSpace(m[1])
+				if targetSymID, ok := globalSymbols[term]; ok && targetSymID != "" {
+					if _, inSubgraph := nodeMap[targetSymID]; !inSubgraph {
+						if liveNode, existsLive := s.eng.GraphIndex().GetNode(targetSymID); existsLive {
+							addNode(liveNode)
+						}
+					}
+					se := types.Edge{
+						SourceID:   art.doc.ID,
+						SourceKind: types.NodeDocument,
+						TargetID:   targetSymID,
+						TargetKind: types.NodeSymbol,
+						Relation:   types.RelReferences,
+						Weight:     1.1,
+						Confidence: 0.92,
+						Provenance: types.ProvStructural,
+						Evidence:   " mentions symbol `" + term + "`",
+						CreatedAt:  now,
+					}
+					if err := se.NormalizeAndValidate(); err == nil {
+						if _, exists := edgeMap[se.ID]; !exists {
+							edgeMap[se.ID] = se
+							crossFileEdges = append(crossFileEdges, se)
+						}
+					}
+				}
+			}
 		}
 	}
 
-	// If not DryRun, commit all crawled documents and cross-file edges into the live Engine
 	if !req.DryRun {
 		for _, art := range artifacts {
 			if err := ctx.Err(); err != nil {
@@ -496,7 +647,6 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 		}
 	}
 
-	// Build temporary CSR index to compute PageRank authority and summary statistics over the crawled subgraph
 	previewCSR := csr.NewIndex()
 	nodes := make([]types.Node, 0, len(nodeMap))
 	nodesByKind := make(map[string]int)
@@ -533,6 +683,7 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 	return &CrawlReport{
 		RootPath:         absRoot,
 		DryRun:           req.DryRun,
+		Scope:            scope,
 		FilesScanned:     filesScanned,
 		FilesMatched:     len(artifacts),
 		FilesSkipped:     filesSkipped,
@@ -548,4 +699,46 @@ func (s *Service) CrawlDirectory(ctx context.Context, req CrawlRequest) (*CrawlR
 		PageRankScores: pprScores,
 		DurationMs:     float64(time.Since(start).Microseconds()) / 1000.0,
 	}, nil
+}
+
+// extractDocxText extracts plain text paragraphs from an Office Open XML (.docx) archive using pure Go.
+func extractDocxText(path string) (string, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return "", err
+	}
+	defer zr.Close()
+
+	for _, f := range zr.File {
+		if f.Name != "word/document.xml" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+		defer rc.Close()
+
+		dec := xml.NewDecoder(io.LimitReader(rc, 4<<20))
+		var b strings.Builder
+		for {
+			tok, err := dec.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return "", err
+			}
+			switch t := tok.(type) {
+			case xml.StartElement:
+				if t.Name.Local == "p" && b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+			case xml.CharData:
+				b.Write(t)
+			}
+		}
+		return strings.TrimSpace(b.String()), nil
+	}
+	return "", fmt.Errorf("word/document.xml not found in docx")
 }
