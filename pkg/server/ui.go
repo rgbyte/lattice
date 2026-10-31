@@ -441,6 +441,7 @@ let animFrameId = null;
 
 function colorForKind(kind) {
   switch ((kind || '').toLowerCase()) {
+    case 'doc':
     case 'document': return '#38bdf8';
     case 'symbol':   return '#a855f7';
     case 'person':   return '#22c55e';
@@ -602,8 +603,11 @@ function tickSimulation() {
 function getVisibleNodes() {
   if (activeKindFilter === 'all') return graphNodes;
   return graphNodes.filter(n => {
+    if (activeKindFilter === 'document') {
+      return n.kind === 'doc' || n.kind === 'document';
+    }
     if (activeKindFilter === 'other') {
-      return !['document', 'symbol', 'person', 'ticket'].includes(n.kind);
+      return !['doc', 'document', 'symbol', 'person', 'ticket'].includes(n.kind);
     }
     return n.kind === activeKindFilter;
   });
@@ -842,7 +846,7 @@ function selectNodeInSidebar(n) {
     properties: n.properties,
     incident_edges: incident
   });
-  if (n.kind === 'document') {
+  if (n.kind === 'document' || n.kind === 'doc') {
     document.getElementById('inspectDocID').value = n.id;
   }
   document.getElementById('inspectNodeID').value = n.id;
