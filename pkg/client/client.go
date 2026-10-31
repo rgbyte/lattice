@@ -112,6 +112,47 @@ func (c *Client) Overview(ctx context.Context) (*admin.OverviewReport, error) {
 	return &out, nil
 }
 
+// ExportGraph retrieves a visualizable snapshot of the Context Graph along with PageRank centrality scores.
+func (c *Client) ExportGraph(
+	ctx context.Context,
+	maxNodes int,
+	userID, userEmail string,
+	groups []string,
+) (*admin.GraphSnapshot, error) {
+	q := url.Values{}
+	if maxNodes > 0 {
+		q.Set("max_nodes", strconv.Itoa(maxNodes))
+	}
+	if userID != "" {
+		q.Set("user_id", userID)
+	}
+	if userEmail != "" {
+		q.Set("email", userEmail)
+	}
+	if len(groups) > 0 {
+		q.Set("groups", strings.Join(groups, ","))
+	}
+	path := "/api/v1/introspect/graph"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var out admin.GraphSnapshot
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// CrawlDirectory recursively crawls a folder path on the server, returning either a dry-run preview graph
+// (when req.DryRun is true) or indexing all matched files into the live Lattice engine.
+func (c *Client) CrawlDirectory(ctx context.Context, req admin.CrawlRequest) (*admin.CrawlReport, error) {
+	var out admin.CrawlReport
+	if err := c.doJSON(ctx, http.MethodPost, "/api/v1/admin/crawl", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // InspectDocument retrieves a document along with its chunks, graph vertex, incident edges, and supersession state.
 func (c *Client) InspectDocument(ctx context.Context, docID string) (*admin.DocumentInspection, error) {
 	q := url.Values{}

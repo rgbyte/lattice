@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -305,5 +306,117 @@ func TestAdmin_EnrichmentSweep_Rebuild_Delete_And_VectorSnapshots(t *testing.T) 
 	}
 	if _, err := svc.InspectDocument(ctx, "doc:sweep-1"); err == nil {
 		t.Fatalf("expected error inspecting deleted document")
+	}
+}
+
+func TestAdmin_CrawlDirectory_DryRun_And_LiveCommit_And_ExportGraph(t *testing.T) {
+	ctx := context.Background()
+	svc, eng := newTestAdminService(t)
+
+	// Create a realistic sample directory with Go source files and Markdown docs
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "auth.go"), []byte(`package auth
+
+import "fmt"
+
+type TokenVerifier struct{}
+
+func VerifyToken(tok string) bool {
+	fmt.Println(tok)
+	return validateSignature(tok)
+}
+
+func validateSignature(tok string) bool {
+	return tok != ""
+}
+`), 0600); err != nil {
+		t.Fatalf("write auth.go: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "gateway.go"), []byte(`package gateway
+
+import "example.com/auth"
+
+func HandleRequest(tok string) bool {
+	return auth.VerifyToken(tok)
+}
+`), 0600); err != nil {
+		t.Fatalf("write gateway.go: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(`# Auth Gateway Architecture
+Authored by @alice and @bob.
+Tracks ticket SEC-101 and PR #42.
+See auth.go and gateway.go for implementation details.
+`), 0600); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+
+	// 1. Dry-Run Mode: must extract full graph (files, symbols, cross-file calls, mentions, tickets) WITHOUT mutating Engine
+	dryRep, err := svc.CrawlDirectory(ctx, CrawlRequest{
+		RootPath:    dir,
+		DryRun:      true,
+		Permissions: []string{"group:eng"},
+	})
+	if err != nil {
+		t.Fatalf("CrawlDirectory(DryRun=true): %v", err)
+	}
+	if !dryRep.DryRun {
+		t.Fatalf("expected DryRun=true in report")
+	}
+	if dryRep.FilesMatched != 3 {
+		t.Fatalf("expected 3 matched files, got %d", dryRep.FilesMatched)
+	}
+	if dryRep.SymbolsExtracted < 4 {
+		t.Fatalf("expected >= 4 extracted Go symbols, got %d", dryRep.SymbolsExtracted)
+	}
+	if len(dryRep.Subgraph.Nodes) < 8 || len(dryRep.Subgraph.Edges) < 8 {
+		t.Fatalf("expected rich subgraph in dry-run, got %d nodes and %d edges", len(dryRep.Subgraph.Nodes), len(dryRep.Subgraph.Edges))
+	}
+	if len(dryRep.PageRankScores) == 0 {
+		t.Fatalf("expected PageRankScores in dry-run report")
+	}
+	// Verify Engine was NOT mutated during DryRun
+	if eng.GraphIndex().Stats().NodeCount != 0 || eng.VectorIndex().Len() != 0 {
+		t.Fatalf("expected 0 nodes and 0 vectors in live Engine after DryRun, got nodes=%d vectors=%d",
+			eng.GraphIndex().Stats().NodeCount, eng.VectorIndex().Len())
+	}
+
+	// 2. Live Commit Mode (DryRun=false): persists documents, vectors, and cross-file edges into Engine
+	liveRep, err := svc.CrawlDirectory(ctx, CrawlRequest{
+		RootPath:    dir,
+		DryRun:      false,
+		Permissions: []string{"group:eng"},
+	})
+	if err != nil {
+		t.Fatalf("CrawlDirectory(DryRun=false): %v", err)
+	}
+	if liveRep.DryRun {
+		t.Fatalf("expected DryRun=false in live report")
+	}
+	if eng.GraphIndex().Stats().NodeCount < 8 || eng.VectorIndex().Len() < 3 {
+		t.Fatalf("expected live Engine to be populated after DryRun=false, got nodes=%d vectors=%d",
+			eng.GraphIndex().Stats().NodeCount, eng.VectorIndex().Len())
+	}
+
+	// 3. ExportGraph: verify PrincipalSet filtering works
+	engPrincipal := types.NewPrincipalSet("alice", "alice@acme.io", []string{"eng"})
+	snapAllowed, err := svc.ExportGraph(ctx, 100, &engPrincipal)
+	if err != nil {
+		t.Fatalf("ExportGraph allowed: %v", err)
+	}
+	if len(snapAllowed.Nodes) < 8 || len(snapAllowed.Edges) < 8 {
+		t.Fatalf("expected >= 8 nodes and edges for authorized principal, got %d nodes, %d edges",
+			len(snapAllowed.Nodes), len(snapAllowed.Edges))
+	}
+
+	unauthPrincipal := types.NewPrincipalSet("eve", "eve@external.io", []string{"guest"})
+	snapBlocked, err := svc.ExportGraph(ctx, 100, &unauthPrincipal)
+	if err != nil {
+		t.Fatalf("ExportGraph blocked: %v", err)
+	}
+	if len(snapBlocked.Nodes) != 0 || len(snapBlocked.Edges) != 0 {
+		t.Fatalf("expected 0 nodes and 0 edges for unauthorized principal, got %d nodes, %d edges",
+			len(snapBlocked.Nodes), len(snapBlocked.Edges))
 	}
 }
