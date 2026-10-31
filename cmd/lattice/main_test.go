@@ -137,4 +137,21 @@ func TestCLI_RemoteThinClient_And_LocalDBModes(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("delete-doc failed (%d): %s", code, errStr)
 	}
+
+	// 8. Run 'crawl <folder> --dry-run' and 'graph'
+	code, out, errStr = runCLI("crawl", ".", "--dry-run")
+	if code != 0 {
+		t.Fatalf("crawl --dry-run failed (%d): %s", code, errStr)
+	}
+	if !strings.Contains(out, `"dry_run": true`) || !strings.Contains(out, `"subgraph"`) {
+		t.Fatalf("unexpected crawl --dry-run output: %s", out)
+	}
+
+	code, out, errStr = runCLI("graph")
+	if code != 0 {
+		t.Fatalf("graph failed (%d): %s", code, errStr)
+	}
+	if !strings.Contains(out, `"nodes"`) || !strings.Contains(out, `"edges"`) {
+		t.Fatalf("unexpected graph output: %s", out)
+	}
 }

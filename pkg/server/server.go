@@ -92,6 +92,7 @@ func (s *Server) authorizeBearer(r *http.Request) bool {
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/", s.handleConsole)
 	s.mux.HandleFunc("/api/v1/introspect/overview", s.handleOverview)
+	s.mux.HandleFunc("/api/v1/introspect/graph", s.handleExportGraph)
 	s.mux.HandleFunc("/api/v1/introspect/document", s.handleInspectDocument)
 	s.mux.HandleFunc("/api/v1/introspect/node", s.handleInspectNode)
 	s.mux.HandleFunc("/api/v1/introspect/explain", s.handleExplainConnection)
@@ -102,6 +103,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/edges", s.handleAdminEdges)
 	s.mux.HandleFunc("/api/v1/admin/enrich-sweep", s.handleAdminEnrichSweep)
 	s.mux.HandleFunc("/api/v1/admin/rebuild", s.handleAdminRebuild)
+	s.mux.HandleFunc("/api/v1/admin/crawl", s.handleAdminCrawl)
 }
 
 func (s *Server) handleConsole(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +129,49 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rep, err := s.adm.SystemOverview(r.Context())
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+func (s *Server) handleExportGraph(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	maxNodes, _ := strconv.Atoi(q.Get("max_nodes"))
+
+	var principal *types.PrincipalSet
+	userID := strings.TrimSpace(q.Get("user_id"))
+	email := strings.TrimSpace(q.Get("email"))
+	groupsRaw := strings.TrimSpace(q.Get("groups"))
+	if userID != "" || email != "" || groupsRaw != "" {
+		p := types.NewPrincipalSet(userID, email, splitCSV(groupsRaw))
+		principal = &p
+	}
+
+	snap, err := s.adm.ExportGraph(r.Context(), maxNodes, principal)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) handleAdminCrawl(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req admin.CrawlRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return
+	}
+	rep, err := s.adm.CrawlDirectory(r.Context(), req)
 	if err != nil {
 		writeDomainError(w, err)
 		return

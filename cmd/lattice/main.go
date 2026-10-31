@@ -41,6 +41,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	groupsCSV := fs.String("groups", "", "Comma-separated group memberships for principal evaluation")
 	hops := fs.Int("hops", 2, "Maximum traversal hops for inspect-node or explain")
 	limit := fs.Int("limit", 10, "Maximum results or enrichment batch limit")
+	dryRun := fs.Bool("dry-run", false, "Dry-run mode for folder crawl (extracts & previews graph without writing to SQLite)")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -63,7 +64,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// If --server is provided, execute via the Thin HTTP Client SDK (pkg/client)
 	if strings.TrimSpace(*serverURL) != "" {
 		cli := client.New(*serverURL, client.WithAdminToken(*adminToken))
-		return runViaThinClient(ctx, cli, cmd, subArgs, *userID, *userEmail, groups, *hops, *limit, stdout, stderr)
+		return runViaThinClient(ctx, cli, cmd, subArgs, *userID, *userEmail, groups, *hops, *limit, *dryRun, stdout, stderr)
 	}
 
 	// Otherwise, open local Engine + Admin Service directly against --db
@@ -91,7 +92,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		client.WithAdminToken(*adminToken),
 		client.WithHTTPClient(&http.Client{Transport: localTransport, Timeout: 30 * time.Second}),
 	)
-	return runViaThinClient(ctx, cli, cmd, subArgs, *userID, *userEmail, groups, *hops, *limit, stdout, stderr)
+	return runViaThinClient(ctx, cli, cmd, subArgs, *userID, *userEmail, groups, *hops, *limit, *dryRun, stdout, stderr)
 }
 
 func runViaThinClient(
@@ -102,6 +103,7 @@ func runViaThinClient(
 	userID, userEmail string,
 	groups []string,
 	hops, limit int,
+	globalDryRun bool,
 	stdout, stderr io.Writer,
 ) int {
 	switch cmd {
@@ -113,6 +115,18 @@ func runViaThinClient(
 		}
 		writePrettyJSON(stdout, rep)
 		return 0
+
+	case "graph":
+		snap, err := cli.ExportGraph(ctx, limit*30, userID, userEmail, groups)
+		if err != nil {
+			fmt.Fprintf(stderr, "graph error: %v\n", err)
+			return 1
+		}
+		writePrettyJSON(stdout, snap)
+		return 0
+
+	case "crawl":
+		return execCrawlSubcommand(ctx, cli, subArgs, globalDryRun, stdout, stderr)
 
 	case "validate":
 		rep, err := cli.ValidateIntegrity(ctx)
@@ -194,11 +208,13 @@ func runViaThinClient(
 
 	case "admin":
 		if len(subArgs) < 1 {
-			fmt.Fprintln(stderr, "usage: lattice admin <enrich-sweep|rebuild|delete-doc|index-doc>")
+			fmt.Fprintln(stderr, "usage: lattice admin <crawl|enrich-sweep|rebuild|delete-doc|index-doc>")
 			return 2
 		}
 		action := strings.ToLower(strings.TrimSpace(subArgs[0]))
 		switch action {
+		case "crawl":
+			return execCrawlSubcommand(ctx, cli, subArgs[1:], globalDryRun, stdout, stderr)
 		case "enrich-sweep":
 			rep, err := cli.TriggerEnrichmentSweep(ctx, limit)
 			if err != nil {
@@ -332,13 +348,67 @@ func writePrettyJSON(w io.Writer, v any) {
 	_ = enc.Encode(v)
 }
 
+func execCrawlSubcommand(
+	ctx context.Context,
+	cli *client.Client,
+	subArgs []string,
+	globalDryRun bool,
+	stdout, stderr io.Writer,
+) int {
+	var (
+		rootPath      string
+		dryRun        = globalDryRun
+		includeTestGo bool
+		maxFiles      = 250
+		perms         = []string{"*"}
+	)
+	for i := 0; i < len(subArgs); i++ {
+		arg := strings.TrimSpace(subArgs[i])
+		switch {
+		case arg == "--dry-run" || arg == "-dry-run" || arg == "-n":
+			dryRun = true
+		case arg == "--include-tests" || arg == "-include-tests":
+			includeTestGo = true
+		case (arg == "--path" || arg == "-path") && i+1 < len(subArgs):
+			i++
+			rootPath = strings.TrimSpace(subArgs[i])
+		case (arg == "--perms" || arg == "--acl") && i+1 < len(subArgs):
+			i++
+			if p := parseCSV(subArgs[i]); len(p) > 0 {
+				perms = p
+			}
+		case !strings.HasPrefix(arg, "-") && rootPath == "":
+			rootPath = arg
+		}
+	}
+	if rootPath == "" {
+		fmt.Fprintln(stderr, "usage: lattice crawl <folder-path> [--dry-run] [--include-tests] [--acl group:eng]")
+		return 2
+	}
+	rep, err := cli.CrawlDirectory(ctx, admin.CrawlRequest{
+		RootPath:      rootPath,
+		DryRun:        dryRun,
+		MaxFiles:      maxFiles,
+		IncludeTestGo: includeTestGo,
+		Permissions:   perms,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "crawl error: %v\n", err)
+		return 1
+	}
+	writePrettyJSON(stdout, rep)
+	return 0
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `Lattice Thin Client & Control Plane CLI
 Usage:
   lattice [flags] <command> [args...]
 
 Commands:
-  serve                                  Start the REST Control Plane & Web Inspector UI
+  serve                                  Start the REST Control Plane & Visual Graph Explorer UI
+  crawl <folder-path> [--dry-run]        Generate Context Graph from a folder (dry-run preview or live index)
+  graph                                  Export the full Context Graph (nodes, edges, and PageRank scores)
   overview                               Inspect graph topology, HNSW vectors, and enrichment queue
   validate                               Audit graph integrity, supersession cycles, and fail-closed ACLs
   inspect-doc <doc-id>                   Inspect document, chunks, graph node, and supersession status
@@ -346,6 +416,7 @@ Commands:
   explain <from-id> <to-id>              Explain shortest path, ACL bridge blocking, and PageRank score
   simulate-acl <id1> [id2...]            Simulate PrincipalSet access decisions against target IDs
   search <query>                         Execute 4-stage hybrid + Context Graph search
+  admin crawl <folder-path> [--dry-run]  Crawl a local directory (dry-run or live commit)
   admin index-doc <id> <title> <body...> Index a document via the admin control plane
   admin enrich-sweep                     Trigger synchronous Phase-2 semantic enrichment sweep
   admin rebuild                          Re-hydrate HNSW and CSR indices from SQLite WAL storage
