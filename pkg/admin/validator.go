@@ -203,11 +203,11 @@ func (s *Service) SimulateAccess(
 			continue
 		}
 
-		matched, reason := matchRuleDetailed(principal, perms)
+		matched, reason, allowed := principal.MatchRuleDetailed(perms)
 		decisions = append(decisions, ACLTargetDecision{
 			TargetID:    id,
 			Kind:        kind,
-			Allowed:     matched != "",
+			Allowed:     allowed,
 			MatchedRule: matched,
 			Permissions: perms,
 			Reason:      reason,
@@ -219,37 +219,4 @@ func (s *Service) SimulateAccess(
 		Decisions: decisions,
 		CheckedAt: time.Now().UTC(),
 	}, nil
-}
-
-func matchRuleDetailed(p types.PrincipalSet, permissions []string) (string, string) {
-	if len(permissions) == 0 {
-		return "", "denied: resource has empty permissions (fail-closed)"
-	}
-	for _, raw := range permissions {
-		rule := strings.ToLower(strings.TrimSpace(raw))
-		if rule == "" {
-			continue
-		}
-		if p.AllowPublic && (rule == "*" || rule == "public") {
-			return raw, fmt.Sprintf("allowed by public rule %q", raw)
-		}
-		if p.UserEmail != "" && (rule == p.UserEmail || rule == "user:"+p.UserEmail) {
-			return raw, fmt.Sprintf("allowed by explicit user email rule %q", raw)
-		}
-		if p.UserID != "" && (rule == p.UserID || rule == "person:"+p.UserID || rule == "user:"+p.UserID) {
-			return raw, fmt.Sprintf("allowed by explicit user ID rule %q", raw)
-		}
-		if p.Domain != "" && rule == "*@"+p.Domain {
-			return raw, fmt.Sprintf("allowed by domain wildcard rule %q", raw)
-		}
-		if strings.HasPrefix(rule, "group:") {
-			grp := strings.TrimPrefix(rule, "group:")
-			if _, ok := p.Groups[grp]; ok {
-				return raw, fmt.Sprintf("allowed by group membership rule %q", raw)
-			}
-		} else if _, ok := p.Groups[rule]; ok {
-			return raw, fmt.Sprintf("allowed by group membership rule %q", raw)
-		}
-	}
-	return "", "denied: no matching principal rule in resource permissions (fail-closed)"
 }

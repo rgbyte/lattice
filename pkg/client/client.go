@@ -29,6 +29,22 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("lattice api http %d: %s", e.StatusCode, e.Message)
 }
 
+// Unwrap maps HTTP status codes back to canonical types sentinel errors for errors.Is checks.
+func (e *APIError) Unwrap() error {
+	switch e.StatusCode {
+	case http.StatusNotFound:
+		return types.ErrNotFound
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return types.ErrUnauthorized
+	case http.StatusBadRequest:
+		return types.ErrInvalidInput
+	case http.StatusGatewayTimeout:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
 // Option configures a Lattice thin HTTP Client.
 type Option func(*Client)
 
@@ -39,20 +55,27 @@ func WithAdminToken(token string) Option {
 	}
 }
 
-// WithHTTPClient overrides the underlying *http.Client.
+// WithHTTPClient overrides the underlying *http.Client (cloning it so shared clients are never mutated).
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) {
 		if hc != nil {
-			c.httpClient = hc
+			cp := *hc
+			if c.timeout > 0 {
+				cp.Timeout = c.timeout
+			}
+			c.httpClient = &cp
 		}
 	}
 }
 
-// WithTimeout configures the HTTP client request timeout.
+// WithTimeout configures the HTTP client request timeout independent of option order.
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		if d > 0 {
-			c.httpClient.Timeout = d
+			c.timeout = d
+			cp := *c.httpClient
+			cp.Timeout = d
+			c.httpClient = &cp
 		}
 	}
 }
@@ -62,6 +85,7 @@ func WithTimeout(d time.Duration) Option {
 type Client struct {
 	baseURL    string
 	adminToken string
+	timeout    time.Duration
 	httpClient *http.Client
 }
 
